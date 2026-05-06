@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Vocab Picture Generator v1.3.0 - 英语单词学习图片批量生成器
-版本: 1.3.0
+Vocab Picture Generator v1.4.0 - 英语单词学习图片批量生成器
+版本: 1.4.0
 
-核心改进（v1.3）：
-- 学习视角系统：每个单词自动生成多角度图片
-- 视角类型：正面/侧面/俯视/特写/切面/场景
-- 学习友好提示词：简单清晰、符合实物教学需求
+核心改进（v1.4）：
+- 部位指示系统：body/vehicle/animal 主题，部位单词自动生成整体+卡通手指指向图
+- QA 自动审核：qwen2.5vl 审核图片，不合格自动删除重生成（最多3次）
+- 三大部位系统：body(人脸+手指指向)/vehicle(汽车+部件指向)/animal(动物+部位指向)
 """
 
 import sys, os, argparse, time, json, random, shutil
@@ -223,6 +223,181 @@ WORD_VISUALS = {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# 部位指示词库（卡通大手指向风格）
+# 用于 body/vehicle 等主题的部位单词，生成【整体+卡通手指指向部位】的图片
+# ═══════════════════════════════════════════════════════════════
+
+# 主题 → 整体单词（部位所属的主体）
+# value=None 表示该单词本身就是整体，不是部位
+PART_OF_SYSTEM = {
+    # 身体部位
+    "body": {
+        "whole": "human face",           # 整体：人脸
+        "whole_word": "face",
+        "whole_visual": "clean front view of a human face, front-facing, neutral expression, clear skin, symmetrical features, plain background",
+        "parts": ["eye","nose","mouth","ear","head","hand","foot","arm","leg","finger"],
+        # 每个部位的卡通手指指向描述
+        "indicator": {
+            "eye":    "a cartoon big pointing finger pointing at the eye, the eye area is highlighted, clear visible eye with iris and pupil, educational diagram style",
+            "nose":   "a cartoon big pointing finger pointing at the nose, the nose area is highlighted, clear visible nose bridge and nostrils, educational diagram style",
+            "mouth":  "a cartoon big pointing finger pointing at the mouth, the lips area is highlighted, clear visible mouth and lips, educational diagram style",
+            "ear":    "a cartoon big pointing finger pointing at the ear, the ear area is highlighted, clear visible ear shell and lobe, educational diagram style",
+            "head":   "a cartoon big pointing finger pointing at the head, the head area is highlighted, clear visible head shape, educational diagram style",
+            "hand":   "a cartoon big pointing finger pointing at the palm, the hand area is highlighted, clear visible palm lines and five fingers, educational diagram style",
+            "foot":   "a cartoon big pointing finger pointing at the foot, the foot area is highlighted, clear visible foot with toes, educational diagram style",
+            "arm":    "a cartoon big pointing finger pointing at the arm, the arm area is highlighted, clear visible arm with elbow, educational diagram style",
+            "leg":    "a cartoon big pointing finger pointing at the leg, the leg area is highlighted, clear visible leg with knee, educational diagram style",
+            "finger": "a cartoon big pointing finger pointing at the index finger, the finger is highlighted, clear visible finger with nail, educational diagram style",
+        },
+    },
+    # 车辆部件
+    "vehicle": {
+        "whole": "sedan car",
+        "whole_word": "car",
+        "whole_visual": "a clean white sedan car, side view, parked on road, simple background, automotive photography",
+        "parts": ["wheel","door","window","headlight","bumper"],
+        "indicator": {
+            "wheel":  "a cartoon big pointing finger pointing at the car wheel, the wheel area is highlighted, clear visible tire and rim, educational diagram style",
+            "door":   "a cartoon big pointing finger pointing at the car door, the door area is highlighted, clear visible door handle and panel, educational diagram style",
+            "window": "a cartoon big pointing finger pointing at the car window, the window area is highlighted, clear visible window glass, educational diagram style",
+            "headlight": "a cartoon big pointing finger pointing at the headlight, the headlight area is highlighted, clear visible headlight bulb and casing, educational diagram style",
+            "bumper": "a cartoon big pointing finger pointing at the bumper, the bumper area is highlighted, clear visible front bumper, educational diagram style",
+        },
+    },
+    # 动物部位
+    "animal": {
+        "whole": "dog",
+        "whole_word": "dog",
+        "whole_visual": "a cute dog, front-facing, sitting pose, clean white background, pet photography style",
+        "parts": ["nose","ear","tail","paw"],
+        "indicator": {
+            "nose":   "a cartoon big pointing finger pointing at the dog's nose, the nose area is highlighted, clear visible black wet nose, educational diagram style",
+            "ear":    "a cartoon big pointing finger pointing at the dog's ear, the ear area is highlighted, clear visible floppy ear, educational diagram style",
+            "tail":   "a cartoon big pointing finger pointing at the dog's tail, the tail area is highlighted, clear visible wagging tail, educational diagram style",
+            "paw":    "a cartoon big pointing finger pointing at the dog's paw, the paw area is highlighted, clear visible paw pads and claws, educational diagram style",
+        },
+    },
+}
+
+# 所有部位单词的集合（用于快速判断）
+ALL_PART_WORDS = set()
+for sys_name, sys_data in PART_OF_SYSTEM.items():
+    ALL_PART_WORDS.update(sys_data["parts"])
+
+# ═══════════════════════════════════════════════════════════════
+# QA 审核系统
+# ═══════════════════════════════════════════════════════════════
+
+import base64, io
+
+def qa_check_image(image_path: str, word: str, style: str, view: str = None) -> tuple:
+    """
+    用 qwen2.5vl 审核图片是否合格（HTTP API 调用）。
+    返回 (ok: bool, reason: str)
+    """
+    try:
+        import base64 as _b64, requests as _req
+        with open(image_path, "rb") as f:
+            img_b64 = _b64.b64encode(f.read()).decode()
+        style_hint = {
+            "cartoon": "cartoon illustration",
+            "realistic-photo": "realistic photograph",
+            "flat-illustration": "flat illustration",
+            "indicator": "cartoon style with pointing finger annotation",
+        }.get(style, style)
+        view_names = {
+            "front": "正面照", "side": "侧面照",
+            "top": "俯视图", "closeup": "特写",
+            "cut": "切面图", "context": "场景照"
+        }
+        part_hint = f"Target word: '{word}'"
+        if view:
+            part_hint += f", View: {view_names.get(view, view)}"
+        check_prompt = (
+            f"You are a strict image reviewer for English vocabulary learning.\n"
+            f"Style: {style_hint}. {part_hint}.\n\n"
+            f"Check: 1)Subject clear? 2)Any extra/deformed limbs? 3)Unnecessary decorations? 4)Style match? 5)No text/watermarks?\n\n"
+            f"Reply with ONE line only:\nPASS - [short reason]\nor\nFAIL - [specific problem]"
+        )
+        payload = {
+            "model": "qwen2.5vl:latest",
+            "prompt": check_prompt,
+            "images": [img_b64],
+            "options": {"temperature": 0.1, "num_predict": 120},
+            "stream": False,
+        }
+        r = _req.post("http://127.0.0.1:11434/api/generate",
+                     json=payload, timeout=60)
+        try:
+            result = r.json().get("response", "").strip()
+        except Exception:
+            # 流式输出时 r.text 是多行 JSON，取最后一行
+            lines = [l for l in r.text.strip().split("\n") if l]
+            result = lines[-1]
+            import json as _j
+            result = _j.loads(result).get("response", "").strip()
+        print(f"QA回复: {result[:80]}", flush=True)
+        if result.startswith("PASS"):
+            return True, result
+        return False, result
+    except Exception as e:
+        print(f"   ⚠️ QA异常({e})，跳过审核", flush=True)
+        return True, f"QA skipped: {e}"
+
+
+def qa_regenerate_if_needed(word: str, style: str, view: str, seed: int,
+                            max_attempts: int = 3,
+                            output_dir: Path = None) -> str:
+    """
+    生成图片并 QA 审核，不合格则重生成，最多 max_attempts 次。
+    返回最终合格的图片路径。
+    """
+    from comfy_client import ComfyUIClient
+    from vram_manager import VMgr
+
+    out_dir = output_dir or DEFAULT_OUTPUT_DIR
+    style_obj = STYLES.get(style, STYLES["flat-illustration"])
+    model_key = style_obj["model"]
+
+
+    for attempt in range(1, max_attempts + 1):
+        current_seed = seed + (attempt - 1) * 10000
+        print(f"   🎲 生成尝试 {attempt}/{max_attempts} (seed={current_seed})", end=" ", flush=True)
+
+        # 生成
+        positive, negative = build_prompt(word, style, view)
+        try:
+            raw = comfy_generate(positive, negative, current_seed, 8, 1024, 1024, style)
+        except Exception as e:
+            print(f"❌ 生成失败: {e}")
+            if attempt == max_attempts:
+                raise
+            continue
+
+        # QA 审核
+        print(f"🔍 QA 审核...", end=" ", flush=True)
+        ok, reason = qa_check_image(raw, word, style, view)
+
+        if ok:
+            print(f"✅ PASS: {reason[:60]}")
+            return raw
+        else:
+            print(f"❌ FAIL: {reason[:80]}")
+            # 删除不合格图片
+            Path(raw).unlink(missing_ok=True)
+            # 如果有 _raw 也删
+            raw_raw = str(Path(raw).parent / (Path(raw).stem.replace("_text","") + "_raw.png"))
+            Path(raw_raw).unlink(missing_ok=True)
+
+            if attempt == max_attempts:
+                print(f"   ⚠️ 达到最大重试次数，跳过")
+                raise RuntimeError(f"QA failed after {max_attempts} attempts: {reason}")
+            print(f"   🔄 删除并重试...")
+
+    raise RuntimeError("Should not reach here")
+
+
+# ═══════════════════════════════════════════════════════════════
 # 风格定义
 # ═══════════════════════════════════════════════════════════════
 
@@ -312,6 +487,24 @@ STYLES = {
         "model_name": "flux1-dev-fp8/flux1-dev-fp8-e4m3fn.safetensors",
         "type": "flux",
         "negative_extra": "realistic, photorealistic, western cartoon, dark",
+    },
+    # 部位指示图风格（卡通手指指向）
+    "indicator": {
+        "desc": "部位指示图（卡通手指指向）",
+        "prompt_extra": (
+            "cartoon style, big bold outline, educational diagram, "
+            "big pointing finger pointing at target, clean white background, "
+            "centered composition, high contrast, clear visible subject, "
+            "vibrant colors, no text, no watermark, no label"
+        ),
+        "model": "realvisxl-v4",
+        "model_name": "realvisxl-v4/RealVisXL_V4.0.safetensors",
+        "type": "sdxl",
+        "negative_extra": (
+            "realistic, photorealistic, photographic, blurry, low quality, "
+            "extra limbs, extra fingers, deformed anatomy, text, watermark, "
+            "label, messy background, 3d render, oil painting"
+        ),
     },
 }
 
@@ -628,6 +821,54 @@ def build_prompt(word, style_key, view=None):
     negative = f"{neg_base}, {style.get('negative_extra','')}"
     return positive, negative
 
+
+def build_indicator_prompt(word: str):
+    """
+    构建部位指示图提示词（卡通大手指向风格）。
+    用于 body/vehicle/animal 等主题的部位单词。
+    """
+    # 找出这个词属于哪个系统
+    part_sys = None
+    for sys_name, sys_data in PART_OF_SYSTEM.items():
+        if word in sys_data["parts"]:
+            part_sys = sys_data
+            break
+
+    if not part_sys:
+        # 不属于任何部位系统，降级使用普通描述
+        visual = get_visual(word)
+        return (
+            f"cute cartoon style, big pointing finger pointing at the {word}, "
+            f"{visual}, clean white background, educational diagram, "
+            f"bold outlines, vibrant colors, no text, no watermark, "
+            f"centered composition"
+        ), (
+            "blurry, low quality, deformed, realistic, photographic, "
+            "text, watermark, multiple fingers, extra limbs"
+        )
+
+    whole_word = part_sys["whole_word"]
+    whole_visual = part_sys["whole_visual"]
+    indicator_desc = part_sys["indicator"].get(word, f"a pointing finger pointing at the {word}")
+
+    positive = (
+        f"{whole_visual}, "
+        f"{indicator_desc}, "
+        f"clean white background, "
+        f"cartoon style, big bold outline, "
+        f"no text, no watermark, no label, "
+        f"centered composition, high contrast, "
+        f"educational illustration style"
+    )
+    negative = (
+        "blurry, low quality, deformed, bad anatomy, extra limbs, "
+        "extra fingers, realistic, photographic, photorealistic, "
+        "text, watermark, label, multiple arrows, messy background, "
+        "3d render, oil painting style, pixelated"
+    )
+    return positive, negative
+
+
 # ═══════════════════════════════════════════════════════════════
 # 单张生成
 # ═══════════════════════════════════════════════════════════════
@@ -638,11 +879,18 @@ def generate(word, style_key, add_text, seed, quality, use_local,
              output_dir=None, view=None):
     word = word.lower().strip()
     translation = get_translation(word)
-    style_key = style_key if style_key in STYLES else "flat-illustration"
+
+    # 部位单词 → 自动使用指示图风格
+    if word in ALL_PART_WORDS:
+        style_key = "indicator"
+        positive, negative = build_indicator_prompt(word)
+    else:
+        style_key = style_key if style_key in STYLES else "flat-illustration"
+        positive, negative = build_prompt(word, style_key, view=view)
+
     steps = STEPS_MAP.get(quality, 8)
     if seed is None:
         seed = random.randint(0, 2**32-1)
-    positive, negative = build_prompt(word, style_key, view=view)
     style = STYLES[style_key]
     result = {
         "word": word, "translation": translation, "style": style_key,
@@ -756,7 +1004,43 @@ def batch_generate(words, count_per_word=1, style=None, add_text=True,
                     print(f"☁️ [cloud-pending]")
                 elif res["success"]:
                     fname = Path(res["file"]).name
-                    print(f"✅ {fname}")
+                    # 部位词 → 自动 QA 审核，不合格则重生成
+                    if w in ALL_PART_WORDS:
+                        print(f"✅ 生成, ", end="", flush=True)
+                        print(f"🔍 QA审核中...", end="", flush=True)
+                        ok, reason = qa_check_image(res["file"], w, st, view)
+                        if not ok:
+                            print(f"\n   ❌ QA失败: {reason[:60]}")
+                            print(f"   🔄 删除并重新生成...", end="", flush=True)
+                            # 删除旧图
+                            Path(res["file"]).unlink(missing_ok=True)
+                            raw_raw = Path(str(Path(res["file"]).parent /
+                                        Path(res["file"]).stem.replace("_text","") + "_raw.png"))
+                            raw_raw.unlink(missing_ok=True)
+                            # 重生成
+                            for retry in range(1, 3):  # 最多重试2次
+                                seed2 = random.randint(0, 2**32-1)
+                                print(f"\n   🎲 重试{retry+1}/3 (seed={seed2})", end="", flush=True)
+                                res2 = generate(w, st, add_text, seed2, quality, use_local,
+                                              output_dir=out_dir, view=view)
+                                if res2.get("success"):
+                                    ok2, reason2 = qa_check_image(res2["file"], w, st, view)
+                                    if ok2:
+                                        print(f"\n   ✅ QA通过! {fname}")
+                                        res = res2
+                                        fname = Path(res["file"]).name
+                                        break
+                                    else:
+                                        print(f"\n   ❌ QA失败: {reason2[:60]}")
+                                        Path(res2["file"]).unlink(missing_ok=True)
+                                else:
+                                    print(f"\n   ❌ 重生成失败")
+                            else:
+                                print(f"\n   ⚠️ 3次重试均失败，跳过")
+                                res["success"] = False
+                                res["error"] = "QA failed after 3 attempts"
+                    else:
+                        print(f"✅ {fname}", end="")
                 else:
                     print(f"❌ {res.get('error','?')}")
                 word_results.append(res)

@@ -3,7 +3,7 @@ name: vocab-picture
 description: >-
   英语单词学习图片生成器。批量生成、学习视角系统（多角度/切面/场景）、本地优先、8种风格。
   触发词：单词图片、学单词、英语图片、vocab
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Vocab Picture Skill v1.2
@@ -148,6 +148,7 @@ results = batch_generate(
 
 ## 维护日志
 
+- v1.4.0 (2026-05-06): **部位指示系统**：新增 INDICATOR_VISUALS 词库（body/vehicle/animal 三大主题），部位单词自动生成整体+卡通手指指向图片；新增 QA 审核（qwen2.5vl），不合格自动删除重生成，最多3次
 - v1.3.0 (2026-05-06): **学习视角系统**：每个单词支持多角度图片（正面/侧面/俯视/特写/切面/场景），水果蔬菜自动包含切面视角；修复真实照片风格艺术化问题
 - v1.2.2 (2026-05-06): 修复文字覆盖画面、底部白色条布局、NotoSansCJK 消除乱码、默认输出目录改为 ~/Pictures/vocab/
 - v1.2.1 (2026-05-06): 修复 FLUX/SD3/RealVisXL 工作流
