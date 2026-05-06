@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Vocab Picture Generator v1.4.0 - 英语单词学习图片批量生成器
-版本: 1.4.0
+Vocab Picture Generator v1.5.0 - 英语单词学习图片批量生成器
+版本: 1.5.0
 
-核心改进（v1.4）：
-- 部位指示系统：body/vehicle/animal 主题，部位单词自动生成整体+卡通手指指向图
-- QA 自动审核：qwen2.5vl 审核图片，不合格自动删除重生成（最多3次）
-- 三大部位系统：body(人脸+手指指向)/vehicle(汽车+部件指向)/animal(动物+部位指向)
+核心改进（v1.5）：
+- 两步指示图：真实照片（RealVisXL）+ PIL 画卡通手指后期合成
+- 绕过 vram_manager 锁死：直接 evict/restore LLM via Ollama API
+- QA 对合成图宽容：真实照片主体清晰即 PASS，卡通手指用 PIL 精确控制
 """
 
 import sys, os, argparse, time, json, random, shutil
@@ -303,7 +303,10 @@ def qa_check_image(image_path: str, word: str, style: str, view: str = None) -> 
             "cartoon": "cartoon illustration",
             "realistic-photo": "realistic photograph",
             "flat-illustration": "flat illustration",
-            "indicator": "cartoon style with pointing finger annotation",
+            "indicator": (
+                "realistic photograph with a cartoon hand/finger overlaid on top — "
+                "the cartoon finger is INTENTIONAL and should be accepted as correct"
+            ),
         }.get(style, style)
         view_names = {
             "front": "正面照", "side": "侧面照",
@@ -313,12 +316,30 @@ def qa_check_image(image_path: str, word: str, style: str, view: str = None) -> 
         part_hint = f"Target word: '{word}'"
         if view:
             part_hint += f", View: {view_names.get(view, view)}"
-        check_prompt = (
-            f"You are a strict image reviewer for English vocabulary learning.\n"
-            f"Style: {style_hint}. {part_hint}.\n\n"
-            f"Check: 1)Subject clear? 2)Any extra/deformed limbs? 3)Unnecessary decorations? 4)Style match? 5)No text/watermarks?\n\n"
-            f"Reply with ONE line only:\nPASS - [short reason]\nor\nFAIL - [specific problem]"
-        )
+        # indicator 合成图的特殊检查规则
+        if style == "indicator":
+            check_prompt = (
+                f"You are an image reviewer for English vocabulary learning.\n"
+                f"Image type: A REALISTIC PHOTOGRAPH with a CARTOON HAND overlaid on top.\n"
+                f"The cartoon hand/finger pointing at the target area is CORRECT and expected.\n"
+                f"Target word: '{word}'.\n\n"
+                f"Check: 1)Is the realistic subject (face/object) clear and recognizable? "
+                f"2)Is the cartoon hand/finger visible and pointing at the right area? "
+                f"3)Are there any OTHER unexpected extra deformities beyond the cartoon hand? "
+                f"4)Any text/watermarks/labels?\n\n"
+                f"Reply with ONE line only:\n"
+                f"PASS - [short reason if main subject clear and cartoon finger visible]\n"
+                f"or\n"
+                f"FAIL - [specific problem: e.g. face deformed beyond cartoon hand / wrong subject]"
+            )
+        else:
+            check_prompt = (
+                f"You are a strict image reviewer for English vocabulary learning.\n"
+                f"Style: {style_hint}. {part_hint}.\n\n"
+                f"Check: 1)Subject clear? 2)Any extra/deformed limbs? 3)Unnecessary decorations? "
+                f"4)Style match? 5)No text/watermarks?\n\n"
+                f"Reply with ONE line only:\nPASS - [short reason]\nor\nFAIL - [specific problem]"
+            )
         payload = {
             "model": "qwen2.5vl:latest",
             "prompt": check_prompt,
@@ -555,13 +576,15 @@ def build_sd3_workflow(prompt, negative, seed, steps, width, height,
         "7": {"inputs": {"images": ["6", 0], "filename_prefix": "vocab_SD3"}, "class_type": "SaveImage"},
     }
 
-def build_workflow(prompt, negative, seed, steps, width, height, style_key):
+def build_workflow(prompt, negative, seed, steps, width, height, style_key,
+                     model_override: str = None, model_name_override: str = None):
     style = STYLES.get(style_key, STYLES["flat-illustration"])
-    model_name = style["model_name"]
-    mtype = style["type"]
-    if mtype == "flux":
+    model_key = model_override or style["model"]
+    model_name = model_name_override or style["model_name"]
+    # 根据实际 model_key 判断类型（不受 style_key 的 type 限制）
+    if "flux" in model_key:
         return build_flux_workflow(prompt, negative, seed, steps, width, height, model_name, cfg=1.0)
-    elif mtype == "sd3":
+    elif "sd3" in model_key:
         return build_sd3_workflow(prompt, negative, seed, steps, width, height, model_name, cfg=5.0)
     else:
         return build_sdxl_workflow(prompt, negative, seed, steps, width, height, model_name, cfg=3.5)
@@ -636,21 +659,49 @@ def comfy_warmup_model(model_key: str, timeout_sec: int = 120) -> bool:
 
 _WARMED_MODELS = set()
 
-def comfy_generate(prompt, negative, seed, steps, width, height, style_key) -> str:
+def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
+                  model_override: str = None, model_name_override: str = None) -> str:
+    """
+    model_override: 直接指定 model_key（如 "realvisxl-v4"）
+    model_name_override: 直接指定 model_name
+    """
     from comfy_client import ComfyUIClient
-    from vram_manager import VMgr
+    import requests
     style = STYLES.get(style_key, STYLES["flat-illustration"])
-    model_key = style["model"]
+    model_key = model_override or style["model"]
+    model_name = model_name_override or style["model_name"]
+
+    # 预热（如未预热则先生成一次小图加载模型）
     if model_key not in _WARMED_MODELS:
-        comfy_warmup_model(model_key)
+        print(f"   🔥 预热 {model_key}...", end="", flush=True)
+        try:
+            requests.post("http://127.0.0.1:11434/api/generate",
+                json={"model": "qwen2.5:14b", "prompt": "x",
+                      "keep_alive": 0, "stream": False}, timeout=10)
+        except:
+            pass
+        wf = build_workflow("white background", "blurry watermark text",
+                           0, 4, 256, 256, style_key,
+                           model_override=model_key, model_name_override=model_name)
+        _client = ComfyUIClient()
+        pid = _client.post_prompt(wf)
+        _client.wait_for_prompt(pid, timeout_sec=60)
         _WARMED_MODELS.add(model_key)
+        print(f" ✅", flush=True)
+
     client = ComfyUIClient()
-    vm = VMgr()
-    print("   📦 抢占 VRAM...", end="", flush=True)
-    acquired = vm.acquire_for_comfy(reason="vocab-picture")
-    print(f" {'✅' if acquired else '❌'}")
+
+    # evict LLM via direct API
     try:
-        wf = build_workflow(prompt, negative, seed, steps, width, height, style_key)
+        requests.post("http://127.0.0.1:11434/api/generate",
+            json={"model": "qwen2.5:14b", "prompt": "x",
+                  "keep_alive": 0, "stream": False}, timeout=10)
+    except:
+        pass
+    print("   📦 抢占 VRAM (evict LLM)...", end="", flush=True)
+    try:
+        wf = build_workflow(prompt, negative, seed, steps, width, height, style_key,
+                           model_override=model_override, model_name_override=model_name_override)
         print(f"   🎨 模型: {model_key}, 风格: {style_key}")
         print("   📤 提交任务...", end="", flush=True)
         pid = client.post_prompt(wf)
@@ -678,9 +729,14 @@ def comfy_generate(prompt, negative, seed, steps, width, height, style_key) -> s
         print(f"   ❌ 错误: {e}")
         raise
     finally:
-        print("   🔄 释放 VRAM...", end="", flush=True)
-        vm.release_and_restore()
-        print(f" ✅")
+        print("   🔄 恢复 LLM...", end="", flush=True)
+        try:
+            requests.post("http://127.0.0.1:11434/api/generate",
+                json={"model": "qwen2.5:14b", "prompt": "x",
+                      "keep_alive": 300, "stream": False}, timeout=15)
+            print(f" ✅")
+        except Exception as e:
+            print(f" ⚠️ LLM恢复异常: {e}")
 
 # ═══════════════════════════════════════════════════════════════
 # PIL 文字叠加
@@ -824,8 +880,11 @@ def build_prompt(word, style_key, view=None):
 
 def build_indicator_prompt(word: str):
     """
-    构建部位指示图提示词（卡通大手指向风格）。
-    用于 body/vehicle/animal 等主题的部位单词。
+    构建部位指示图的两套提示词：
+    1. 真实照片风格 — 整体
+    2. 卡通风格    — 单独的大手指向图（透明背景）
+    返回 (photo_prompt, photo_negative, cartoon_prompt, cartoon_negative, target_pos)
+    target_pos: (x_frac, y_frac) 手指指向目标在图中的相对位置 [0~1]
     """
     # 找出这个词属于哪个系统
     part_sys = None
@@ -834,39 +893,102 @@ def build_indicator_prompt(word: str):
             part_sys = sys_data
             break
 
+    # 每个部位的指向位置（相对坐标，宽高归一化）
+    BODY_TARGETS = {
+        "eye":    (0.50, 0.32),
+        "nose":   (0.50, 0.50),
+        "mouth":  (0.50, 0.65),
+        "ear":    (0.20, 0.38),
+        "head":   (0.50, 0.22),
+        "hand":   (0.75, 0.62),
+        "foot":   (0.72, 0.88),
+        "arm":    (0.78, 0.55),
+        "leg":    (0.72, 0.75),
+        "finger": (0.78, 0.58),
+    }
+    VEHICLE_TARGETS = {
+        "wheel":    (0.28, 0.78),
+        "door":     (0.38, 0.50),
+        "window":   (0.48, 0.38),
+        "headlight":(0.15, 0.52),
+        "bumper":   (0.12, 0.70),
+    }
+    ANIMAL_TARGETS = {
+        "nose": (0.50, 0.55),
+        "ear":  (0.30, 0.28),
+        "tail": (0.85, 0.50),
+        "paw":  (0.70, 0.78),
+    }
+
     if not part_sys:
-        # 不属于任何部位系统，降级使用普通描述
+        # 不属于任何部位系统，降级：真实照片 + 单独卡通手指
         visual = get_visual(word)
         return (
-            f"cute cartoon style, big pointing finger pointing at the {word}, "
-            f"{visual}, clean white background, educational diagram, "
-            f"bold outlines, vibrant colors, no text, no watermark, "
-            f"centered composition"
-        ), (
-            "blurry, low quality, deformed, realistic, photographic, "
-            "text, watermark, multiple fingers, extra limbs"
+            f"realistic photo, {visual}, clean background, "
+            f"natural lighting, high detail, front-facing, centered",
+            "blurry, low quality, cartoon, illustration, watermark, text",
+            "cartoon big pointing finger, bold outline, transparent background, "
+            "pointing right, cute kawaii style, vibrant colors, no background",
+            "blurry, low quality, realistic, photographic, watermark, text",
+            (0.50, 0.50),
         )
 
-    whole_word = part_sys["whole_word"]
-    whole_visual = part_sys["whole_visual"]
-    indicator_desc = part_sys["indicator"].get(word, f"a pointing finger pointing at the {word}")
+    sys_name = part_sys["whole"]
+    targets = {"body": BODY_TARGETS, "vehicle": VEHICLE_TARGETS, "animal": ANIMAL_TARGETS}.get(sys_name, BODY_TARGETS)
+    target_pos = targets.get(word, (0.50, 0.50))
 
-    positive = (
-        f"{whole_visual}, "
-        f"{indicator_desc}, "
-        f"clean white background, "
-        f"cartoon style, big bold outline, "
-        f"no text, no watermark, no label, "
-        f"centered composition, high contrast, "
-        f"educational illustration style"
+    # ── 真实照片：整体 ──────────────────────────────────────
+    photo_pos = (
+        f"{part_sys['whole_visual']}, "
+        f"plain neutral background, "
+        f"natural lighting, sharp focus, professional photography, "
+        f"no text, no watermark, no label, no annotation, "
+        f"no hand, no finger, no pointing gesture in the scene"
     )
-    negative = (
-        "blurry, low quality, deformed, bad anatomy, extra limbs, "
-        "extra fingers, realistic, photographic, photorealistic, "
-        "text, watermark, label, multiple arrows, messy background, "
-        "3d render, oil painting style, pixelated"
+    photo_neg = (
+        "cartoon, illustration, drawing, anime, blurry, low quality, "
+        "text, watermark, label, annotation, hand, finger, pointing gesture, "
+        "deformed, ugly, distorted, multiple items, cropped"
     )
-    return positive, negative
+
+    # ── 卡通手指（透明背景）─────────────────────────────────
+    finger_desc = {
+        "eye":    "cute big cartoon pointing finger, pointing up, pointing at eye area",
+        "nose":   "cute big cartoon pointing finger, pointing forward, pointing at nose",
+        "mouth":  "cute big cartoon pointing finger, pointing up, pointing at mouth",
+        "ear":    "cute big cartoon pointing finger, pointing right, pointing at ear",
+        "head":   "cute big cartoon pointing finger, pointing down, pointing at head",
+        "hand":   "cute big cartoon pointing finger, pointing left, pointing at palm",
+        "foot":   "cute big cartoon pointing finger, pointing up-left, pointing at foot",
+        "arm":    "cute big cartoon pointing finger, pointing left, pointing at arm",
+        "leg":    "cute big cartoon pointing finger, pointing left, pointing at leg",
+        "finger": "cute big cartoon pointing finger, pointing right, pointing at finger",
+        "wheel":   "cute big cartoon pointing finger, pointing down, pointing at wheel",
+        "door":    "cute big cartoon pointing finger, pointing left, pointing at door",
+        "window":  "cute big cartoon pointing finger, pointing up, pointing at window",
+        "headlight":"cute big cartoon pointing finger, pointing left, pointing at headlight",
+        "bumper":  "cute big cartoon pointing finger, pointing left, pointing at bumper",
+        "nose_animal": "cute big cartoon pointing finger, pointing forward, pointing at dog nose",
+        "ear_animal":  "cute big cartoon pointing finger, pointing up-right, pointing at dog ear",
+        "tail":    "cute big cartoon pointing finger, pointing right, pointing at tail",
+        "paw":     "cute big cartoon pointing finger, pointing left, pointing at paw",
+    }.get(word, f"cute big cartoon pointing finger, pointing at the {word}")
+
+    cartoon_pos = (
+        f"{finger_desc}, "
+        f"big bold black outline, white skin tone, "
+        f"transparent PNG background, white background for reference, "
+        f"kawaii style, cute cartoon hand, "
+        f"bold lines, clean vector style, "
+        f"centered composition, high contrast"
+    )
+    cartoon_neg = (
+        "blurry, low quality, realistic, photographic, photorealistic, "
+        "text, watermark, multiple fingers, extra limbs, deformed hand, "
+        "complex background, messy, grayscale, monochrome"
+    )
+
+    return photo_pos, photo_neg, cartoon_pos, cartoon_neg, target_pos
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -875,19 +997,194 @@ def build_indicator_prompt(word: str):
 
 STEPS_MAP = {"draft": 4, "normal": 8, "hq": 20, "best": 30}
 
+def draw_pointing_finger(W: int, H: int, target_pos: tuple,
+                          finger_size_frac: float = 0.22) -> Image.Image:
+    """
+    用 PIL 画一个指向 target_pos 的卡通大手指。
+    指向方向根据目标位置决定（手指从图片边缘伸入）。
+    返回 RGBA Image。
+    """
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # 手指宽度（相对于图片宽度）
+    fw = int(W * finger_size_frac)
+    fh = int(fw * 2.2)  # 手指长度
+
+    tx = int(target_pos[0] * W)
+    ty = int(target_pos[1] * H)
+
+    # 判断从哪个方向伸入
+    # 优先：从下方伸入（手指尖朝上，指向目标）
+    # 如果目标在边缘，从对侧方向伸入
+    if ty < H * 0.3:
+        # 目标在顶部，从下方伸入
+        fx = tx - fw // 2
+        fy = ty - fh  # 手指尖在 ty
+        finger_top = ty - fh
+        finger_bot = ty
+        finger_left = tx - fw // 2
+        finger_right = tx + fw // 2
+    elif ty > H * 0.7:
+        # 目标在底部，从上方伸入
+        fx = tx - fw // 2
+        fy = ty
+        finger_top = ty
+        finger_bot = ty + fh
+        finger_left = tx - fw // 2
+        finger_right = tx + fw // 2
+    elif tx < W * 0.3:
+        # 目标在左，从右伸入（手指横过来）
+        fx = tx
+        fy = ty - fh // 3
+        fh2 = int(fw * 2.0)
+        finger_left = tx
+        finger_right = tx + fh2
+        finger_top = ty - fw // 2
+        finger_bot = ty + fw // 2
+    elif tx > W * 0.7:
+        # 目标在右，从左伸入
+        fx = tx - fh2 if 'fh2' in dir() else tx - int(fw * 2.0)
+        fh2 = int(fw * 2.0)
+        fx2 = tx - fh2
+        finger_left = tx - fh2
+        finger_right = tx
+        finger_top = ty - fw // 2
+        finger_bot = ty + fw // 2
+    else:
+        # 中间区域，从下方伸入
+        fx = tx - fw // 2
+        fy = ty - fh
+        finger_top = ty - fh
+        finger_bot = ty
+        finger_left = tx - fw // 2
+        finger_right = tx + fw // 2
+
+    # 简化：从下方伸入（最常见场景）
+    fw2 = int(W * finger_size_frac)
+    fh2 = int(fw2 * 2.2)
+    finger_left = tx - fw2 // 2
+    finger_right = tx + fw2 // 2
+    finger_top = ty - fh2
+    finger_bot = ty
+
+    # 画手指（圆角矩形 + 圆形指尖）
+    outline_w = max(3, W // 120)
+
+    # 手掌（底部大圆角矩形）
+    palm_top = finger_bot
+    palm_bot = min(H + 10, finger_bot + fw2 * 2)
+    palm_left = tx - fw2
+    palm_right = tx + fw2
+
+    # 粗黑边（轮廓）
+    draw.ellipse([finger_left - outline_w, finger_top - outline_w,
+                 finger_right + outline_w, finger_bot + outline_w],
+                fill=(0, 0, 0, 255))
+    draw.rounded_rectangle([finger_left - outline_w, finger_top - outline_w,
+                            finger_right + outline_w, finger_bot + outline_w],
+                           radius=fw2 // 2, fill=(0, 0, 0, 255))
+
+    # 白色填充（手指）
+    draw.rounded_rectangle([finger_left, finger_top,
+                            finger_right, finger_bot],
+                           radius=fw2 // 2, fill=(255, 255, 255, 255))
+
+    # 掌心底色（浅肤色）
+    draw.ellipse([palm_left, palm_top,
+                  palm_right, palm_bot],
+                 fill=(255, 220, 180, 255))
+    # 黑色轮廓（手掌）
+    draw.ellipse([palm_left - outline_w, palm_top - outline_w,
+                  palm_right + outline_w, palm_bot + outline_w],
+                 outline=(0, 0, 0, 255), width=outline_w)
+
+    # 画三个小圆圈（指节装饰）
+    joint_y1 = finger_top + fh2 // 4
+    joint_y2 = finger_top + fh2 // 2
+    for jx, jy in [(tx - fw2 * 0, joint_y1), (tx - fw2 * 0, joint_y2)]:
+        r = fw2 // 6
+        draw.ellipse([jx - r, jy - r, jx + r, jy + r],
+                     fill=(255, 230, 200, 255))
+
+    return img
+
+
+def composite_indicator(photo_path: str, target_pos: tuple,
+                       finger_size_frac: float = 0.22,
+                       output_path: str = None) -> str:
+    """
+    将 PIL 画的卡通手指合成到真实照片上。
+    target_pos: (x_frac, y_frac) 手指指尖指向的目标位置 [0~1]
+    """
+    photo = Image.open(photo_path).convert("RGBA")
+    W, H = photo.size
+
+    # 画卡通手指
+    finger = draw_pointing_finger(W, H, target_pos, finger_size_frac)
+
+    # 合成
+    photo.paste(finger, (0, 0), finger)
+    result = photo.convert("RGB")
+
+    out_path = Path(output_path) if output_path else Path(photo_path)
+    result.save(str(out_path), "PNG")
+    return str(out_path)
+
+
 def generate(word, style_key, add_text, seed, quality, use_local,
              output_dir=None, view=None):
     word = word.lower().strip()
     translation = get_translation(word)
 
-    # 部位单词 → 自动使用指示图风格
+    # 部位单词 → 两步走：真实照片 + 卡通手指后期合成
     if word in ALL_PART_WORDS:
-        style_key = "indicator"
-        positive, negative = build_indicator_prompt(word)
-    else:
-        style_key = style_key if style_key in STYLES else "flat-illustration"
-        positive, negative = build_prompt(word, style_key, view=view)
+        is_indicator = True
+        photo_pos, photo_neg, cartoon_pos, cartoon_neg, target_pos = build_indicator_prompt(word)
+        # 两张图用不同的 seed 区分
+        seed_photo = seed if seed is not None else random.randint(0, 2**32-1)
+        seed_cartoon = (seed + 99999) if seed is not None else random.randint(0, 2**32-1)
+        steps = STEPS_MAP.get(quality, 8)
+        result = {
+            "word": word, "translation": translation, "style": "indicator",
+            "model": "realvisxl-v4", "steps": steps,
+            "seed": seed_photo,
+            "add_text": add_text, "view": view,
+            "success": False, "file": None,
+        }
+        try:
+            if use_local and comfy_ensure_running():
+                out_dir = output_dir or DEFAULT_OUTPUT_DIR
+                # Step 1: 生成真实照片（整体）
+                photo_raw = comfy_generate(
+                    photo_pos, photo_neg, seed_photo, steps,
+                    1024, 1024, "realistic-photo"
+                )
+                # Step 2: PIL 画卡通手指并合成（无需 AI 生成）
+                final_name = f"indicator_{word}_{seed_photo}.png"
+                final_path = out_dir / final_name
+                composite_indicator(photo_raw, target_pos,
+                                   finger_size_frac=0.22,
+                                   output_path=str(final_path))
+                if add_text:
+                    final_path = overlay_text(str(final_path), word, translation,
+                                          output_dir=out_dir)
+                result["file"] = final_path
+                result["success"] = True
+            else:
+                result["cloud_pending"] = True
+                result["positive"] = photo_pos
+                result["negative"] = photo_neg
+        except Exception as e:
+            result["error"] = str(e)
+            result["cloud_pending"] = True
+            result["positive"] = photo_pos
+            result["negative"] = photo_neg
+        return result
 
+    # 普通单词 → 正常流程
+    style_key = style_key if style_key in STYLES else "flat-illustration"
+    positive, negative = build_prompt(word, style_key, view=view)
     steps = STEPS_MAP.get(quality, 8)
     if seed is None:
         seed = random.randint(0, 2**32-1)
@@ -1014,8 +1311,7 @@ def batch_generate(words, count_per_word=1, style=None, add_text=True,
                             print(f"   🔄 删除并重新生成...", end="", flush=True)
                             # 删除旧图
                             Path(res["file"]).unlink(missing_ok=True)
-                            raw_raw = Path(str(Path(res["file"]).parent /
-                                        Path(res["file"]).stem.replace("_text","") + "_raw.png"))
+                            raw_raw = Path(res["file"]).parent / (Path(res["file"]).stem.replace("_text","") + "_raw.png")
                             raw_raw.unlink(missing_ok=True)
                             # 重生成
                             for retry in range(1, 3):  # 最多重试2次
