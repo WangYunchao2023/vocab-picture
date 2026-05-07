@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Vocab Picture Generator v1.5.0 - 英语单词学习图片批量生成器
-版本: 1.5.0
+Vocab Picture Generator v1.7.0 - 英语单词学习图片批量生成器
+版本: 1.7.0
 
-核心改进（v1.5）：
-- 两步指示图：真实照片（RealVisXL）+ PIL 画卡通手指后期合成
-- 绕过 vram_manager 锁死：直接 evict/restore LLM via Ollama API
-- QA 对合成图宽容：真实照片主体清晰即 PASS，卡通手指用 PIL 精确控制
+核心改进（v1.7）：
+- 移除文字叠加功能（--text-en/--text-off）
+- 移除内置词库（-t/--theme 参数）
+- 保留学习视角系统（多角度/切面）
 """
 
 import sys, os, argparse, time, json, random, shutil
@@ -559,78 +559,6 @@ def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
             print(f" ⚠️ LLM恢复异常: {e}")
 
 # ═══════════════════════════════════════════════════════════════
-# PIL 文字叠加
-# ═══════════════════════════════════════════════════════════════
-
-def overlay_text(image_path: str, word: str, translation: str,
-                font_size: int = 80, zh_size: int = 48,
-                output_dir: Path = None) -> str:
-    img = Image.open(image_path).convert("RGBA")
-    W, H = img.size
-    zh_font_paths = [
-        "/home/wangyc/.local/share/fonts/wps/NotoSansCJK-Medium.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
-    ]
-    bold_font_paths = [
-        "/home/wangyc/.local/share/fonts/wps/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ]
-    zh_font = en_font = None
-    for fp in zh_font_paths:
-        if Path(fp).exists():
-            try:
-                zh_font = ImageFont.truetype(fp, zh_size)
-                break
-            except:
-                pass
-    for fp in bold_font_paths:
-        if Path(fp).exists():
-            try:
-                en_font = ImageFont.truetype(fp, font_size)
-                break
-            except:
-                pass
-    if zh_font is None:
-        zh_font = ImageFont.load_default()
-    if en_font is None:
-        en_font = zh_font
-
-    en_text = word.upper()
-    zh_text = translation
-    dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    en_bb = dummy.textbbox((0, 0), en_text, font=en_font)
-    zh_bb = dummy.textbbox((0, 0), zh_text, font=zh_font)
-    en_w, en_h = en_bb[2]-en_bb[0], en_bb[3]-en_bb[1]
-    zh_w, zh_h = zh_bb[2]-zh_bb[0], zh_bb[3]-zh_bb[1]
-    bar_h = max(en_h, zh_h) + 36
-    bar_y = H - bar_h
-    overlay = Image.new("RGBA", (W, H), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
-    draw.rectangle([(0, bar_y), (W, H)], fill=(255, 255, 255, 255))
-    ex = (W - en_w) // 2
-    ey = bar_y + 6
-    for dx, dy in [(-2,-2),(-2,2),(2,-2),(2,2),(0,-2),(0,2),(-2,0),(2,0)]:
-        draw.text((ex+dx, ey+dy), en_text, fill=(255,255,255,255), font=en_font)
-    draw.text((ex, ey), en_text, fill=(30, 60, 140), font=en_font)
-    zx = (W - zh_w) // 2
-    zy = ey + en_h + 4
-    for dx, dy in [(-1,-1),(-1,1),(1,-1),(1,1)]:
-        draw.text((zx+dx, zy+dy), zh_text, fill=(255,255,255,255), font=zh_font)
-    draw.text((zx, zy), zh_text, fill=(80, 80, 80), font=zh_font)
-    out = Image.alpha_composite(img, overlay).convert("RGB")
-    out_dir = output_dir or DEFAULT_OUTPUT_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = Path(image_path).stem
-    new_path = out_dir / f"{stem}.png"
-    out.save(new_path, "PNG")
-    raw_path = out_dir / f"{stem}_raw.png"
-    if not raw_path.exists():
-        raw = Image.open(image_path).convert("RGB")
-        raw.save(raw_path, "PNG")
-    return str(new_path)
-
-# ═══════════════════════════════════════════════════════════════
 # 提示词构建（学习版）
 # ═══════════════════════════════════════════════════════════════
 
@@ -955,55 +883,10 @@ def composite_indicator(photo_path: str, target_pos: tuple,
     return str(out_path)
 
 
-def generate(word, style_key, add_text, seed, quality, use_local,
+def generate(word, style_key, seed, quality, use_local,
              output_dir=None, view=None):
     word = word.lower().strip()
     translation = get_translation(word)
-
-    # 部位单词 → 两步走：真实照片 + 卡通手指后期合成
-    if word in ALL_PART_WORDS:
-        is_indicator = True
-        photo_pos, photo_neg, cartoon_pos, cartoon_neg, target_pos = build_indicator_prompt(word)
-        # 两张图用不同的 seed 区分
-        seed_photo = seed if seed is not None else random.randint(0, 2**32-1)
-        seed_cartoon = (seed + 99999) if seed is not None else random.randint(0, 2**32-1)
-        steps = STEPS_MAP.get(quality, 8)
-        result = {
-            "word": word, "translation": translation, "style": "indicator",
-            "model": "realvisxl-v4", "steps": steps,
-            "seed": seed_photo,
-            "add_text": add_text, "view": view,
-            "success": False, "file": None,
-        }
-        try:
-            if use_local and comfy_ensure_running():
-                out_dir = output_dir or DEFAULT_OUTPUT_DIR
-                # Step 1: 生成真实照片（整体）
-                photo_raw = comfy_generate(
-                    photo_pos, photo_neg, seed_photo, steps,
-                    1024, 1024, "realistic-photo"
-                )
-                # Step 2: PIL 画卡通手指并合成（无需 AI 生成）
-                final_name = f"indicator_{word}_{seed_photo}.png"
-                final_path = out_dir / final_name
-                composite_indicator(photo_raw, target_pos,
-                                   finger_size_frac=0.22,
-                                   output_path=str(final_path))
-                if add_text:
-                    final_path = overlay_text(str(final_path), word, translation,
-                                          output_dir=out_dir)
-                result["file"] = final_path
-                result["success"] = True
-            else:
-                result["cloud_pending"] = True
-                result["positive"] = photo_pos
-                result["negative"] = photo_neg
-        except Exception as e:
-            result["error"] = str(e)
-            result["cloud_pending"] = True
-            result["positive"] = photo_pos
-            result["negative"] = photo_neg
-        return result
 
     # 普通单词 → 正常流程
     style_key = style_key if style_key in STYLES else "flat-illustration"
@@ -1015,19 +898,14 @@ def generate(word, style_key, add_text, seed, quality, use_local,
     result = {
         "word": word, "translation": translation, "style": style_key,
         "model": style["model"], "steps": steps, "seed": seed,
-        "add_text": add_text, "view": view,
+        "view": view,
         "positive": positive, "negative": negative,
         "success": False, "file": None,
     }
     try:
         if use_local and comfy_ensure_running():
             raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
-            if add_text:
-                final = overlay_text(raw, word, translation,
-                                   output_dir=output_dir or DEFAULT_OUTPUT_DIR)
-            else:
-                final = raw
-            result["file"] = final
+            result["file"] = raw
             result["success"] = True
         else:
             result["cloud_pending"] = True
@@ -1040,7 +918,7 @@ def generate(word, style_key, add_text, seed, quality, use_local,
 # 批量生成
 # ═══════════════════════════════════════════════════════════════
 
-def batch_generate(words, count_per_word=1, style=None, add_text=True,
+def batch_generate(words, count_per_word=1, style=None,
                    quality="normal", force_cloud=False, dry_run=False,
                    output_dir=None, views=None):
     """
@@ -1052,13 +930,12 @@ def batch_generate(words, count_per_word=1, style=None, add_text=True,
     """
     out_dir = output_dir or DEFAULT_OUTPUT_DIR
     print("=" * 60)
-    print(f"📚 Vocab Picture Generator v1.3.0")
+    print(f"📚 Vocab Picture Generator v1.7.0")
     print("=" * 60)
     print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📝 单词: {words}")
     print(f"🔢 每词张数: {count_per_word}")
     print(f"🎨 风格: {style or '轮换'}")
-    print(f"📝 文字: {'是' if add_text else '否'}")
     print(f"⚡ 质量: {quality}")
     print(f"📂 输出: {out_dir}")
     print(f"📐 视角: {'自动分配' if views is None else views}")
@@ -1118,48 +995,13 @@ def batch_generate(words, count_per_word=1, style=None, add_text=True,
                 continue
 
             try:
-                res = generate(w, st, add_text, seed, quality, use_local,
+                res = generate(w, st, seed, quality, use_local,
                              output_dir=out_dir, view=view)
                 if res.get("cloud_pending"):
                     print(f"☁️ [cloud-pending]")
                 elif res["success"]:
                     fname = Path(res["file"]).name
-                    # 部位词 → 自动 QA 审核，不合格则重生成
-                    if w in ALL_PART_WORDS:
-                        print(f"✅ 生成, ", end="", flush=True)
-                        print(f"🔍 QA审核中...", end="", flush=True)
-                        ok, reason = qa_check_image(res["file"], w, st, view)
-                        if not ok:
-                            print(f"\n   ❌ QA失败: {reason[:60]}")
-                            print(f"   🔄 删除并重新生成...", end="", flush=True)
-                            # 删除旧图
-                            Path(res["file"]).unlink(missing_ok=True)
-                            raw_raw = Path(res["file"]).parent / (Path(res["file"]).stem.replace("_text","") + "_raw.png")
-                            raw_raw.unlink(missing_ok=True)
-                            # 重生成
-                            for retry in range(1, 3):  # 最多重试2次
-                                seed2 = random.randint(0, 2**32-1)
-                                print(f"\n   🎲 重试{retry+1}/3 (seed={seed2})", end="", flush=True)
-                                res2 = generate(w, st, add_text, seed2, quality, use_local,
-                                              output_dir=out_dir, view=view)
-                                if res2.get("success"):
-                                    ok2, reason2 = qa_check_image(res2["file"], w, st, view)
-                                    if ok2:
-                                        print(f"\n   ✅ QA通过! {fname}")
-                                        res = res2
-                                        fname = Path(res["file"]).name
-                                        break
-                                    else:
-                                        print(f"\n   ❌ QA失败: {reason2[:60]}")
-                                        Path(res2["file"]).unlink(missing_ok=True)
-                                else:
-                                    print(f"\n   ❌ 重生成失败")
-                            else:
-                                print(f"\n   ⚠️ 3次重试均失败，跳过")
-                                res["success"] = False
-                                res["error"] = "QA failed after 3 attempts"
-                    else:
-                        print(f"✅ {fname}", end="")
+                    print(f"✅ {fname}", end="")
                 else:
                     print(f"❌ {res.get('error','?')}")
                 word_results.append(res)
@@ -1191,7 +1033,7 @@ def batch_generate(words, count_per_word=1, style=None, add_text=True,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vocab Picture Generator v1.3.0 - 英语单词学习图片生成器",
+        description="Vocab Picture Generator v1.7.0 - 英语单词学习图片生成器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 学习视角说明:
@@ -1220,8 +1062,6 @@ def main():
     parser.add_argument("-w", "--words", type=str)
     parser.add_argument("-c", "--count", type=int, default=1)
     parser.add_argument("-s", "--style", type=str)
-    parser.add_argument("--text-en", dest="add_text", action="store_true", default=True)
-    parser.add_argument("--text-off", dest="add_text", action="store_false")
     parser.add_argument("-q", "--quality", type=str, default="normal",
                         choices=["draft","normal","hq","best"])
     parser.add_argument("--force-cloud", action="store_true")
@@ -1256,7 +1096,7 @@ def main():
             args.count = len(views)
 
     out_dir = Path(args.output) if args.output else DEFAULT_OUTPUT_DIR
-    batch_generate(words, args.count, args.style, args.add_text,
+    batch_generate(words, args.count, args.style,
                    args.quality, args.force_cloud, args.dry_run,
                    output_dir=out_dir, views=views)
 

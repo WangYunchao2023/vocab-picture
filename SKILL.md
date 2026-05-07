@@ -3,7 +3,7 @@ name: vocab-picture
 description: >-
   英语单词学习图片生成器。批量生成、学习视角系统（多角度/切面/场景）、本地优先、8种风格。
   触发词：单词图片、学单词、英语图片、vocab
-version: 1.5.0
+version: 1.7.0
 ---
 
 # Vocab Picture Skill
@@ -17,7 +17,6 @@ version: 1.5.0
 | **批量生成** | 多单词批量生成变体图片 |
 | **本地优先** | 自动启动 ComfyUI + VRAM 管理，省云端额度 |
 | **8 种风格** | 扁平/卡通/真实照片/水彩/绘本/线条/复古/可爱 |
-| **文字开关** | PIL 叠加英文+中文，避开 SD 文字生成弱点 |
 | **模型匹配** | 风格自动匹配最佳模型（FLUX/RealVisXL/SD3） |
 
 ---
@@ -34,9 +33,6 @@ python3 vocab_gen.py -w apple,banana -c 2
 
 # 指定风格
 python3 vocab_gen.py -w cat -s realistic-photo
-
-# 关闭文字叠加
-python3 vocab_gen.py -w cat -s cartoon --text-off
 
 # 高质量
 python3 vocab_gen.py -w apple,banana -q hq
@@ -60,7 +56,6 @@ results = batch_generate(
     words=["apple", "banana", "cat"],
     count_per_word=2,
     style="cartoon",       # None=轮换风格
-    add_text=True,
     quality="normal",
 )
 ```
@@ -91,8 +86,6 @@ results = batch_generate(
 | `-w, --words` | 单词列表，逗号分隔（必填） |
 | `-c, --count` | 每词生成张数（变体数） |
 | `-s, --style` | 风格：`flat-illustration`, `cartoon`, `realistic-photo`, `watercolor`, `children-book`, `line-art`, `vintage`, `kawaii` |
-| `--text-en` | 叠加英文+中文文字（默认） |
-| `--text-off` | 不叠加文字 |
 | `-q, --quality` | 质量：`draft`(4步) / `normal`(8步) / `hq`(20步) / `best`(30步) |
 | `--force-cloud` | 强制使用云端 |
 | `--dry-run` | 仅预览提示词 |
@@ -120,13 +113,12 @@ results = batch_generate(
 - **默认输出目录**：`~/Pictures/vocab/`
 - **本地生成**：`~/ComfyUI/output/vocab_*.png` → 自动复制到 `~/Pictures/vocab/`
 - **云端生成**：`~/.openclaw/media/tool-image-generation/`
-- **文字叠加**：本地生成后自动叠加，底部白色条 + 英文在上中文在下 + NotoSansCJK 字体消除乱码
-- **原始文件**：每张图同时保存 `_raw.png` 无文字版本
 
 ---
 
 ## 维护日志
 
+- v1.7.0 (2026-05-07): 移除文字叠加功能，移除内置词库和 `-t/--theme` 参数
 - v1.6.0 (2026-05-07): 移除内置词库和 `-t/--theme` 参数，用户直接传入单词
 - v1.5.0 (2026-05-06): **两步指示图**：真实照片（RealVisXL）+ PIL 画卡通手指后期合成；修复 vram_manager 卡死问题；QA 审核宽容处理合成图
 - v1.4.0 (2026-05-06): **部位指示系统**：INDICATOR_VISUALS 词库（body/vehicle/animal），QA 审核（qwen2.5vl），不合格自动重生成
