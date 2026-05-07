@@ -103,186 +103,6 @@ def get_word_views(word: str, count: int):
 
     return views[:count]
 
-# ═══════════════════════════════════════════════════════════════
-# 词库
-# ═══════════════════════════════════════════════════════════════
-
-WORD_THEMES = {
-    "animal":    ["cat","dog","fish","bird","rabbit","elephant","lion","monkey","bear","panda"],
-    "food":      ["apple","banana","orange","grape","strawberry","pizza","burger","cake","rice","bread"],
-    "fruit":     ["apple","banana","orange","grape","strawberry","watermelon","mango","peach","pear","cherry"],
-    "vegetable": ["carrot","tomato","potato","broccoli","corn","cucumber","lettuce","pepper","onion","garlic"],
-    "color":     ["red","blue","green","yellow","pink","purple","orange","black","white","brown"],
-    "number":    ["one","two","three","four","five","six","seven","eight","nine","ten"],
-    "object":    ["book","pen","pencil","chair","table","bed","cup","ball","car","tree"],
-    "body":      ["eye","nose","mouth","ear","hand","foot","head","arm","leg","finger"],
-    "clothing":  ["hat","shirt","pants","dress","shoe","sock","coat","glove","scarf","boot"],
-    "nature":    ["sun","moon","star","cloud","rain","snow","flower","grass","leaf","river"],
-}
-
-WORD_TRANSLATIONS = {
-    "cat":"猫","dog":"狗","fish":"鱼","bird":"鸟","rabbit":"兔子","elephant":"大象",
-    "lion":"狮子","monkey":"猴子","bear":"熊","panda":"熊猫",
-    "apple":"苹果","banana":"香蕉","orange":"橙子","grape":"葡萄","strawberry":"草莓",
-    "pizza":"披萨","burger":"汉堡","cake":"蛋糕","rice":"米饭","bread":"面包",
-    "watermelon":"西瓜","mango":"芒果","peach":"桃子","pear":"梨","cherry":"樱桃",
-    "carrot":"胡萝卜","tomato":"番茄","potato":"土豆","broccoli":"西兰花","corn":"玉米",
-    "cucumber":"黄瓜","lettuce":"生菜","pepper":"辣椒","onion":"洋葱","garlic":"大蒜",
-    "red":"红色","blue":"蓝色","green":"绿色","yellow":"黄色","pink":"粉色",
-    "purple":"紫色","black":"黑色","white":"白色","brown":"棕色",
-    "one":"一","two":"二","three":"三","four":"四","five":"五",
-    "six":"六","seven":"七","eight":"八","nine":"九","ten":"十",
-    "book":"书","pen":"钢笔","pencil":"铅笔","chair":"椅子","table":"桌子",
-    "bed":"床","cup":"杯子","ball":"球","car":"汽车","tree":"树",
-    "eye":"眼睛","nose":"鼻子","mouth":"嘴巴","ear":"耳朵","hand":"手",
-    "foot":"脚","head":"头","arm":"手臂","leg":"腿","finger":"手指",
-    "hat":"帽子","shirt":"衬衫","pants":"裤子","dress":"连衣裙","shoe":"鞋子",
-    "sock":"袜子","coat":"外套","glove":"手套","scarf":"围巾","boot":"靴子",
-    "sun":"太阳","moon":"月亮","star":"星星","cloud":"云","rain":"雨",
-    "snow":"雪","flower":"花","grass":"草","leaf":"叶子","river":"河流",
-}
-
-# 视觉特征（核心描述）
-WORD_VISUALS = {
-    "cat":"orange tabby cat, fluffy fur, sitting pose",
-    "dog":"brown puppy, floppy ears, happy tail wagging",
-    "fish":"orange goldfish, translucent fins, swimming",
-    "bird":"blue tit bird, small, perched on branch",
-    "rabbit":"white bunny, long ears, cute hop pose",
-    "elephant":"gray elephant, big ears, gentle expression",
-    "lion":"golden mane lion, majestic, alert gaze",
-    "monkey":"brown monkey, playful, natural pose",
-    "bear":"brown bear, fluffy fur, standing on hind legs",
-    "panda":"black and white giant panda, eating bamboo",
-    "apple":"a fresh red apple, natural shape, small green leaf attached",
-    "banana":"a ripe yellow banana, slightly curved, one end slightly green",
-    "orange":"a fresh orange fruit, slightly dimpled skin, bright color",
-    "grape":"a bunch of purple grapes, natural cluster, slight bloom on skin",
-    "strawberry":"a fresh red strawberry, seeds visible, green cap with stem",
-    "watermelon":"a slice of watermelon, red flesh, black seeds scattered",
-    "mango":"a ripe yellow mango, natural oval shape, slight blush on skin",
-    "peach":"a pink-blushed peach, fuzzy skin, natural crease",
-    "pear":"a green-yellow pear, teardrop shape, natural stem",
-    "cherry":"two red cherries, connected by stems, fresh and glossy",
-    "carrot":"an orange carrot, tapered root, fresh green tops attached",
-    "tomato":"a bright red tomato, smooth skin, natural stem cap",
-    "potato":"a brown oval potato, slightly dirty, natural eyes",
-    "broccoli":"a fresh head of broccoli, dark green florets, thick stalk",
-    "corn":"a yellow ear of corn, husks partially peeled, silk visible",
-    "cucumber":"a long green cucumber, slightly curved, matte skin",
-    "lettuce":"a fresh green lettuce head, loose leaves, crisp",
-    "pepper":"a red bell pepper, glossy skin, three-lobed shape",
-    "onion":"a brown onion, papery skin, round shape",
-    "garlic":"a white garlic bulb, individual cloves visible, papery skin",
-    "red":"a solid red color swatch, clean surface",
-    "blue":"a solid blue color swatch, clean surface",
-    "green":"a solid green color swatch, clean surface",
-    "yellow":"a solid yellow color swatch, clean surface",
-    "pink":"a solid pink color swatch, clean surface",
-    "purple":"a solid purple color swatch, clean surface",
-    "book":"an open hardcover book, colorful pages visible",
-    "pen":"a blue ballpoint pen, sleek body, cap removed",
-    "pencil":"a yellow Number 2 pencil, sharpened tip, pink eraser",
-    "chair":"a wooden dining chair, simple design, four legs",
-    "table":"a wooden dining table, four legs, natural wood grain",
-    "bed":"a cozy bed with pillows, neatly made, warm comforter",
-    "cup":"a white ceramic cup, handle on side, empty inside",
-    "ball":"a red rubber ball, slightly deflated, smooth surface",
-    "car":"a red toy car, small scale model, simple design",
-    "tree":"a large green oak tree, round canopy, brown textured trunk",
-    "eye":"a human eye, detailed iris, natural lashes, direct gaze",
-    "nose":"a human nose, front view, natural shape",
-    "mouth":"a smiling human mouth, natural teeth, relaxed expression",
-    "ear":"a human ear, side view, natural shape and curves",
-    "hand":"an open human palm, five fingers spread, natural pose",
-    "foot":"a human foot, side view, natural arch, five toes",
-    "head":"a human head, front view, neutral expression, natural",
-    "arm":"a human arm, relaxed pose, natural skin tone",
-    "leg":"a human leg, standing pose, natural proportions",
-    "finger":"a human finger, index finger pointing, natural nail",
-    "hat":"a red baseball cap, curved brim, fabric texture",
-    "shirt":"a blue cotton shirt, folded, visible collar and buttons",
-    "pants":"a pair of brown trousers, folded, waistband visible",
-    "dress":"a pink summer dress, simple A-line silhouette, sleeveless",
-    "shoe":"a white running shoe, side view, lace detail visible",
-    "sock":"a white cotton sock, ankle length, ribbed cuff",
-    "coat":"a yellow winter coat, hood visible, zipper partially open",
-    "glove":"a red winter glove, five fingers, knit texture",
-    "scarf":"a blue wool scarf, folded, soft texture visible",
-    "boot":"a brown leather boot, ankle height, lace-up front",
-    "sun":"the bright sun in blue sky, warm golden rays, morning light",
-    "moon":"a crescent moon, white glow, dark night sky with stars",
-    "star":"a bright star in night sky, twinkling, with smaller stars around",
-    "cloud":"a fluffy white cloud, blue sky background, cotton-like shape",
-    "rain":"raindrops falling, wet street surface, gray overcast sky",
-    "snow":"snowflakes falling, white snow on ground, winter scene",
-    "flower":"a pink rose bloom, petals open, green stem with thorns",
-    "grass":"a patch of green grass, dew drops on blades, close-up",
-    "leaf":"a green maple leaf, detailed veins, autumn leaf shape",
-    "river":"a flowing river, clear blue water, rocks and pebbles on riverbed",
-}
-
-# ═══════════════════════════════════════════════════════════════
-# 部位指示词库（卡通大手指向风格）
-# 用于 body/vehicle 等主题的部位单词，生成【整体+卡通手指指向部位】的图片
-# ═══════════════════════════════════════════════════════════════
-
-# 主题 → 整体单词（部位所属的主体）
-# value=None 表示该单词本身就是整体，不是部位
-PART_OF_SYSTEM = {
-    # 身体部位
-    "body": {
-        "whole": "human face",           # 整体：人脸
-        "whole_word": "face",
-        "whole_visual": "clean front view of a human face, front-facing, neutral expression, clear skin, symmetrical features, plain background",
-        "parts": ["eye","nose","mouth","ear","head","hand","foot","arm","leg","finger"],
-        # 每个部位的卡通手指指向描述
-        "indicator": {
-            "eye":    "a cartoon big pointing finger pointing at the eye, the eye area is highlighted, clear visible eye with iris and pupil, educational diagram style",
-            "nose":   "a cartoon big pointing finger pointing at the nose, the nose area is highlighted, clear visible nose bridge and nostrils, educational diagram style",
-            "mouth":  "a cartoon big pointing finger pointing at the mouth, the lips area is highlighted, clear visible mouth and lips, educational diagram style",
-            "ear":    "a cartoon big pointing finger pointing at the ear, the ear area is highlighted, clear visible ear shell and lobe, educational diagram style",
-            "head":   "a cartoon big pointing finger pointing at the head, the head area is highlighted, clear visible head shape, educational diagram style",
-            "hand":   "a cartoon big pointing finger pointing at the palm, the hand area is highlighted, clear visible palm lines and five fingers, educational diagram style",
-            "foot":   "a cartoon big pointing finger pointing at the foot, the foot area is highlighted, clear visible foot with toes, educational diagram style",
-            "arm":    "a cartoon big pointing finger pointing at the arm, the arm area is highlighted, clear visible arm with elbow, educational diagram style",
-            "leg":    "a cartoon big pointing finger pointing at the leg, the leg area is highlighted, clear visible leg with knee, educational diagram style",
-            "finger": "a cartoon big pointing finger pointing at the index finger, the finger is highlighted, clear visible finger with nail, educational diagram style",
-        },
-    },
-    # 车辆部件
-    "vehicle": {
-        "whole": "sedan car",
-        "whole_word": "car",
-        "whole_visual": "a clean white sedan car, side view, parked on road, simple background, automotive photography",
-        "parts": ["wheel","door","window","headlight","bumper"],
-        "indicator": {
-            "wheel":  "a cartoon big pointing finger pointing at the car wheel, the wheel area is highlighted, clear visible tire and rim, educational diagram style",
-            "door":   "a cartoon big pointing finger pointing at the car door, the door area is highlighted, clear visible door handle and panel, educational diagram style",
-            "window": "a cartoon big pointing finger pointing at the car window, the window area is highlighted, clear visible window glass, educational diagram style",
-            "headlight": "a cartoon big pointing finger pointing at the headlight, the headlight area is highlighted, clear visible headlight bulb and casing, educational diagram style",
-            "bumper": "a cartoon big pointing finger pointing at the bumper, the bumper area is highlighted, clear visible front bumper, educational diagram style",
-        },
-    },
-    # 动物部位
-    "animal": {
-        "whole": "dog",
-        "whole_word": "dog",
-        "whole_visual": "a cute dog, front-facing, sitting pose, clean white background, pet photography style",
-        "parts": ["nose","ear","tail","paw"],
-        "indicator": {
-            "nose":   "a cartoon big pointing finger pointing at the dog's nose, the nose area is highlighted, clear visible black wet nose, educational diagram style",
-            "ear":    "a cartoon big pointing finger pointing at the dog's ear, the ear area is highlighted, clear visible floppy ear, educational diagram style",
-            "tail":   "a cartoon big pointing finger pointing at the dog's tail, the tail area is highlighted, clear visible wagging tail, educational diagram style",
-            "paw":    "a cartoon big pointing finger pointing at the dog's paw, the paw area is highlighted, clear visible paw pads and claws, educational diagram style",
-        },
-    },
-}
-
-# 所有部位单词的集合（用于快速判断）
-ALL_PART_WORDS = set()
-for sys_name, sys_data in PART_OF_SYSTEM.items():
-    ALL_PART_WORDS.update(sys_data["parts"])
 
 # ═══════════════════════════════════════════════════════════════
 # QA 审核系统
@@ -813,6 +633,9 @@ def overlay_text(image_path: str, word: str, translation: str,
 # ═══════════════════════════════════════════════════════════════
 # 提示词构建（学习版）
 # ═══════════════════════════════════════════════════════════════
+
+WORD_TRANSLATIONS = {}
+WORD_VISUALS = {}
 
 def get_translation(word):
     return WORD_TRANSLATIONS.get(word.lower(), word)
@@ -1389,14 +1212,13 @@ def main():
 
 示例:
   python3 vocab_gen.py -w apple -c 5           # 5张不同视角（正面/侧面/俯视/特写/切面）
-  python3 vocab_gen.py -t fruit -c 3           # 水果主题，每词3张
+  python3 vocab_gen.py -w apple,banana -c 3      # 批量生成，每词3张
   python3 vocab_gen.py -w apple,banana -c 2 -s realistic-photo  # 指定风格
   python3 vocab_gen.py -w apple -c 5 --views front,side,cut   # 指定视角顺序
         """
     )
     parser.add_argument("-w", "--words", type=str)
     parser.add_argument("-c", "--count", type=int, default=1)
-    parser.add_argument("-t", "--theme", type=str)
     parser.add_argument("-s", "--style", type=str)
     parser.add_argument("--text-en", dest="add_text", action="store_true", default=True)
     parser.add_argument("--text-off", dest="add_text", action="store_false")
@@ -1411,17 +1233,11 @@ def main():
     args = parser.parse_args()
 
     words = []
-    if args.theme:
-        t = args.theme.lower()
-        if t not in WORD_THEMES:
-            print(f"❌ 未知主题: {t}")
-            sys.exit(1)
-        words = WORD_THEMES[t]
     if args.words:
         words += [w.strip() for w in args.words.split(",")]
     words = list(dict.fromkeys(words))
     if not words:
-        print("❌ 需要指定 -w <words> 或 -t <theme>")
+        print("❌ 需要指定 -w <words>")
         sys.exit(1)
 
     # 解析视角
