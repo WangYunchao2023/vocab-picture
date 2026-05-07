@@ -3,7 +3,7 @@ name: vocab-picture
 description: >-
   英语单词学习图片生成器。批量生成、学习视角系统（多角度/切面/场景）、本地优先、8种风格。
   触发词：单词图片、学单词、英语图片、vocab
-version: 1.7.0
+version: 1.8.0
 ---
 
 # Vocab Picture Skill
@@ -18,6 +18,7 @@ version: 1.7.0
 | **本地优先** | 自动启动 ComfyUI + VRAM 管理，省云端额度 |
 | **8 种风格** | 扁平/卡通/真实照片/水彩/绘本/线条/复古/可爱 |
 | **模型匹配** | 风格自动匹配最佳模型（FLUX/RealVisXL/SD3） |
+| **参考图模式** | `--ref-face + --parts`：任意物体/实体多部位特写，保持身份一致性 |
 
 ---
 
@@ -89,6 +90,8 @@ results = batch_generate(
 | `-q, --quality` | 质量：`draft`(4步) / `normal`(8步) / `hq`(20步) / `best`(30步) |
 | `--force-cloud` | 强制使用云端 |
 | `--dry-run` | 仅预览提示词 |
+| `--ref-face <路径>` | 参考物品图片路径，基于该图生成部位特写 |
+| `--parts <部件>` | 部件名称如 `engine,hood,wheel`（配合 `--ref-face`，任意单词） |
 
 ---
 
@@ -116,8 +119,35 @@ results = batch_generate(
 
 ---
 
+## 参考图模式
+
+基于同一张参考图片，生成该物体的不同部位或角度特写（SDXL img2img，denoise=0.65）。
+
+```bash
+# 任意物体：汽车的不同部件
+python3 vocab_gen.py -w car \
+  --ref-face ~/Pictures/car.jpg \
+  --parts engine,hood,wheel,steering \
+  -c 1 -q hq
+
+# 人脸特写（内置专用提示词）
+python3 vocab_gen.py -w face \
+  --ref-face ~/Pictures/portrait.jpg \
+  --parts eye,nose,mouth,ear,eyebrow,cheek,chin,forehead \
+  -c 1 -q hq
+
+# 不同角度（视角词作为虚拟部件）
+python3 vocab_gen.py -w bird \
+  --ref-face ~/Pictures/bird.jpg \
+  --parts front,side,top \
+  -c 1 -q hq
+```
+
+**原理**：参考图 → VAEEncode 进 latent → KSampler 去噪生成 → 保持主体身份的同时聚焦特定部位/角度。
+
 ## 维护日志
 
+- v1.8.0 (2026-05-07): **参考图模式**（`--ref-face + --parts`）：支持任意物体/实体多部位特写；通用模板 + 人脸专用模板组合；SDXL img2img（denoise=0.65）
 - v1.7.0 (2026-05-07): 移除文字叠加功能，移除内置词库和 `-t/--theme` 参数
 - v1.6.0 (2026-05-07): 移除内置词库和 `-t/--theme` 参数，用户直接传入单词
 - v1.5.0 (2026-05-06): **两步指示图**：真实照片（RealVisXL）+ PIL 画卡通手指后期合成；修复 vram_manager 卡死问题；QA 审核宽容处理合成图

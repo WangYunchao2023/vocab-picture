@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Vocab Picture Generator v1.7.0 - 英语单词学习图片批量生成器
+Vocab Picture Generator v1.8.0 - 英语单词学习图片批量生成器
 版本: 1.7.0
 
-核心改进（v1.7）：
-- 移除文字叠加功能（--text-en/--text-off）
-- 移除内置词库（-t/--theme 参数）
-- 保留学习视角系统（多角度/切面）
+核心改进（v1.8）：
+- 参考图模式（--ref-face + --parts）：任意物体/实体不同部位特写，基于同一参考图保持一致性
+- SDXL img2img（denoise=0.65）：参考图作为 init latent，VAEEncode 编码后 KSampler 去噪
+- 支持所有视角词（front/side/top 等）作为虚拟部件
 """
 
 import sys, os, argparse, time, json, random, shutil
@@ -74,6 +74,38 @@ VIEW_PROMPTS = {
         "bg": "natural indoor setting, everyday environment, lifestyle photography",
     },
 }
+
+# ═══════════════════════════════════════════════════════════════
+# 人脸部位特写提示词（配合 --ref-face 参考图使用）
+# ═══════════════════════════════════════════════════════════════
+SPECIAL_PART_PROMPTS = {
+    "eye": {"desc": "眼睛特写", "prompt": "extreme close-up of both eyes, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed eyes, watermark, text, extra fingers"},
+    "nose": {"desc": "鼻子特写", "prompt": "extreme close-up of the nose, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed nose, watermark, text, extra fingers"},
+    "mouth": {"desc": "嘴巴特写", "prompt": "extreme close-up of the mouth and lips, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed mouth, watermark, text, extra fingers"},
+    "ear": {"desc": "耳朵特写", "prompt": "close-up of the ear, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed ear, watermark, text"},
+    "eyebrow": {"desc": "眉毛特写", "prompt": "close-up of the eyebrows, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed eyebrows, watermark, text"},
+    "cheek": {"desc": "脸颊特写", "prompt": "close-up of the cheek, same person as reference photo, maintaining facial identity, realistic skin texture, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, smooth plastic skin, watermark, text"},
+    "chin": {"desc": "下巴特写", "prompt": "close-up of the chin and jawline, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed chin, watermark, text"},
+    "forehead": {"desc": "额头特写", "prompt": "close-up of the forehead, same person as reference photo, maintaining facial identity, realistic skin texture, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, smooth plastic skin, watermark, text"},
+}
+
+# ═══════════════════════════════════════════════════════════════
+# SDXL img2img workflow（参考图模式，用于保持人脸一致性）
+# ═══════════════════════════════════════════════════════════════
+def build_sdxl_ref_workflow(ref_image_path, prompt, negative, seed, steps, width, height,
+                              model_name='realvisxl-v4/RealVisXL_V4.0.safetensors',
+                              denoise=0.6):
+    ref_abs = str(Path(ref_image_path).resolve())
+    return {
+        "1": {"inputs": {"ckpt_name": model_name}, "class_type": "CheckpointLoaderSimple"},
+        "2": {"inputs": {"text": prompt, "clip": ["1", 1]}, "class_type": "CLIPTextEncode"},
+        "3": {"inputs": {"text": negative, "clip": ["1", 1]}, "class_type": "CLIPTextEncode"},
+        "load": {"inputs": {"image": ref_abs}, "class_type": "LoadImage"},
+        "4": {"inputs": {"pixels": ["load", 0], "vae": ["1", 2]}, "class_type": "VAEEncode"},
+        "5": {"inputs": {"seed": seed, "steps": steps, "cfg": 3.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0], "model": ["1", 0], "denoise": denoise}, "class_type": "KSampler"},
+        "6": {"inputs": {"samples": ["5", 0], "vae": ["1", 2]}, "class_type": "VAEDecode"},
+        "7": {"inputs": {"images": ["6", 0], "filename_prefix": "vocab_ref"}, "class_type": "SaveImage"},
+    }
 
 # 水果/蔬菜单词 → 支持 cut 视图
 CUTABLE_WORDS = {
@@ -480,7 +512,8 @@ def comfy_warmup_model(model_key: str, timeout_sec: int = 120) -> bool:
 _WARMED_MODELS = set()
 
 def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
-                  model_override: str = None, model_name_override: str = None) -> str:
+                  model_override: str = None, model_name_override: str = None,
+                  ref_image: str = None, denoise: float = 0.6) -> str:
     """
     model_override: 直接指定 model_key（如 "realvisxl-v4"）
     model_name_override: 直接指定 model_name
@@ -520,8 +553,14 @@ def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
         pass
     print("   📦 抢占 VRAM (evict LLM)...", end="", flush=True)
     try:
-        wf = build_workflow(prompt, negative, seed, steps, width, height, style_key,
-                           model_override=model_override, model_name_override=model_name_override)
+        if ref_image:
+            wf = build_sdxl_ref_workflow(
+                ref_image, prompt, negative, seed, steps, width, height,
+                model_name=model_name_override or style['model_name'],
+                denoise=denoise)
+        else:
+            wf = build_workflow(prompt, negative, seed, steps, width, height, style_key,
+                               model_override=model_override, model_name_override=model_name_override)
         print(f"   🎨 模型: {model_key}, 风格: {style_key}")
         print("   📤 提交任务...", end="", flush=True)
         pid = client.post_prompt(wf)
@@ -628,118 +667,6 @@ def build_prompt(word, style_key, view=None):
     negative = f"{neg_base}, {style.get('negative_extra','')}"
     return positive, negative
 
-
-def build_indicator_prompt(word: str):
-    """
-    构建部位指示图的两套提示词：
-    1. 真实照片风格 — 整体
-    2. 卡通风格    — 单独的大手指向图（透明背景）
-    返回 (photo_prompt, photo_negative, cartoon_prompt, cartoon_negative, target_pos)
-    target_pos: (x_frac, y_frac) 手指指向目标在图中的相对位置 [0~1]
-    """
-    # 找出这个词属于哪个系统
-    part_sys = None
-    for sys_name, sys_data in PART_OF_SYSTEM.items():
-        if word in sys_data["parts"]:
-            part_sys = sys_data
-            break
-
-    # 每个部位的指向位置（相对坐标，宽高归一化）
-    BODY_TARGETS = {
-        "eye":    (0.50, 0.32),
-        "nose":   (0.50, 0.50),
-        "mouth":  (0.50, 0.65),
-        "ear":    (0.20, 0.38),
-        "head":   (0.50, 0.22),
-        "hand":   (0.75, 0.62),
-        "foot":   (0.72, 0.88),
-        "arm":    (0.78, 0.55),
-        "leg":    (0.72, 0.75),
-        "finger": (0.78, 0.58),
-    }
-    VEHICLE_TARGETS = {
-        "wheel":    (0.28, 0.78),
-        "door":     (0.38, 0.50),
-        "window":   (0.48, 0.38),
-        "headlight":(0.15, 0.52),
-        "bumper":   (0.12, 0.70),
-    }
-    ANIMAL_TARGETS = {
-        "nose": (0.50, 0.55),
-        "ear":  (0.30, 0.28),
-        "tail": (0.85, 0.50),
-        "paw":  (0.70, 0.78),
-    }
-
-    if not part_sys:
-        # 不属于任何部位系统，降级：真实照片 + 单独卡通手指
-        visual = get_visual(word)
-        return (
-            f"realistic photo, {visual}, clean background, "
-            f"natural lighting, high detail, front-facing, centered",
-            "blurry, low quality, cartoon, illustration, watermark, text",
-            "cartoon big pointing finger, bold outline, transparent background, "
-            "pointing right, cute kawaii style, vibrant colors, no background",
-            "blurry, low quality, realistic, photographic, watermark, text",
-            (0.50, 0.50),
-        )
-
-    sys_name = part_sys["whole"]
-    targets = {"body": BODY_TARGETS, "vehicle": VEHICLE_TARGETS, "animal": ANIMAL_TARGETS}.get(sys_name, BODY_TARGETS)
-    target_pos = targets.get(word, (0.50, 0.50))
-
-    # ── 真实照片：整体 ──────────────────────────────────────
-    photo_pos = (
-        f"{part_sys['whole_visual']}, "
-        f"plain neutral background, "
-        f"natural lighting, sharp focus, professional photography, "
-        f"no text, no watermark, no label, no annotation, "
-        f"no hand, no finger, no pointing gesture in the scene"
-    )
-    photo_neg = (
-        "cartoon, illustration, drawing, anime, blurry, low quality, "
-        "text, watermark, label, annotation, hand, finger, pointing gesture, "
-        "deformed, ugly, distorted, multiple items, cropped"
-    )
-
-    # ── 卡通手指（透明背景）─────────────────────────────────
-    finger_desc = {
-        "eye":    "cute big cartoon pointing finger, pointing up, pointing at eye area",
-        "nose":   "cute big cartoon pointing finger, pointing forward, pointing at nose",
-        "mouth":  "cute big cartoon pointing finger, pointing up, pointing at mouth",
-        "ear":    "cute big cartoon pointing finger, pointing right, pointing at ear",
-        "head":   "cute big cartoon pointing finger, pointing down, pointing at head",
-        "hand":   "cute big cartoon pointing finger, pointing left, pointing at palm",
-        "foot":   "cute big cartoon pointing finger, pointing up-left, pointing at foot",
-        "arm":    "cute big cartoon pointing finger, pointing left, pointing at arm",
-        "leg":    "cute big cartoon pointing finger, pointing left, pointing at leg",
-        "finger": "cute big cartoon pointing finger, pointing right, pointing at finger",
-        "wheel":   "cute big cartoon pointing finger, pointing down, pointing at wheel",
-        "door":    "cute big cartoon pointing finger, pointing left, pointing at door",
-        "window":  "cute big cartoon pointing finger, pointing up, pointing at window",
-        "headlight":"cute big cartoon pointing finger, pointing left, pointing at headlight",
-        "bumper":  "cute big cartoon pointing finger, pointing left, pointing at bumper",
-        "nose_animal": "cute big cartoon pointing finger, pointing forward, pointing at dog nose",
-        "ear_animal":  "cute big cartoon pointing finger, pointing up-right, pointing at dog ear",
-        "tail":    "cute big cartoon pointing finger, pointing right, pointing at tail",
-        "paw":     "cute big cartoon pointing finger, pointing left, pointing at paw",
-    }.get(word, f"cute big cartoon pointing finger, pointing at the {word}")
-
-    cartoon_pos = (
-        f"{finger_desc}, "
-        f"big bold black outline, white skin tone, "
-        f"transparent PNG background, white background for reference, "
-        f"kawaii style, cute cartoon hand, "
-        f"bold lines, clean vector style, "
-        f"centered composition, high contrast"
-    )
-    cartoon_neg = (
-        "blurry, low quality, realistic, photographic, photorealistic, "
-        "text, watermark, multiple fingers, extra limbs, deformed hand, "
-        "complex background, messy, grayscale, monochrome"
-    )
-
-    return photo_pos, photo_neg, cartoon_pos, cartoon_neg, target_pos
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -884,13 +811,31 @@ def composite_indicator(photo_path: str, target_pos: tuple,
 
 
 def generate(word, style_key, seed, quality, use_local,
-             output_dir=None, view=None):
+             output_dir=None, view=None, ref_image=None, denoise=0.6):
     word = word.lower().strip()
     translation = get_translation(word)
 
     # 普通单词 → 正常流程
     style_key = style_key if style_key in STYLES else "flat-illustration"
-    positive, negative = build_prompt(word, style_key, view=view)
+    # 参考图模式：任意物体/实体生成部位特写
+    if ref_image:
+        if word in SPECIAL_PART_PROMPTS:
+            part_info = SPECIAL_PART_PROMPTS[word]
+            positive = part_info["prompt"]
+            negative = part_info["negative"]
+        else:
+            # 通用模板：参考图为主体，生成指定部位/角度特写
+            positive = (
+                f"close-up detail of the {word} of the object in the reference photo, "
+                f"maintaining exact object identity, realistic photograph, "
+                f"sharp focus, professional studio lighting, high quality"
+            )
+            negative = (
+                "cartoon, illustration, anime, blurry, low quality, deformed, "
+                "watermark, text, extra limbs, bad anatomy, ugly"
+            )
+    else:
+        positive, negative = build_prompt(word, style_key, view=view)
     steps = STEPS_MAP.get(quality, 8)
     if seed is None:
         seed = random.randint(0, 2**32-1)
@@ -904,7 +849,8 @@ def generate(word, style_key, seed, quality, use_local,
     }
     try:
         if use_local and comfy_ensure_running():
-            raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
+            raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key,
+                               ref_image=ref_image, denoise=denoise)
             result["file"] = raw
             result["success"] = True
         else:
@@ -920,7 +866,8 @@ def generate(word, style_key, seed, quality, use_local,
 
 def batch_generate(words, count_per_word=1, style=None,
                    quality="normal", force_cloud=False, dry_run=False,
-                   output_dir=None, views=None):
+                   output_dir=None, views=None,
+                   ref_face=None, parts=None):
     """
     批量生成单词学习图片
 
@@ -930,7 +877,7 @@ def batch_generate(words, count_per_word=1, style=None,
     """
     out_dir = output_dir or DEFAULT_OUTPUT_DIR
     print("=" * 60)
-    print(f"📚 Vocab Picture Generator v1.7.0")
+    print(f"📚 Vocab Picture Generator v1.8.0")
     print("=" * 60)
     print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📝 单词: {words}")
@@ -996,7 +943,8 @@ def batch_generate(words, count_per_word=1, style=None,
 
             try:
                 res = generate(w, st, seed, quality, use_local,
-                             output_dir=out_dir, view=view)
+                             output_dir=out_dir, view=view,
+                             ref_image=ref_face, denoise=0.65)
                 if res.get("cloud_pending"):
                     print(f"☁️ [cloud-pending]")
                 elif res["success"]:
@@ -1033,7 +981,7 @@ def batch_generate(words, count_per_word=1, style=None,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vocab Picture Generator v1.7.0 - 英语单词学习图片生成器",
+        description="Vocab Picture Generator v1.8.0 - 英语单词学习图片生成器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 学习视角说明:
@@ -1067,6 +1015,10 @@ def main():
     parser.add_argument("--force-cloud", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("-o", "--output", type=str, default=None)
+    parser.add_argument("--ref-face", type=str, default=None,
+                        help="参考物品/实体图片路径，用于生成同一部件或角度的特写")
+    parser.add_argument("--parts", type=str, default=None,
+                        help="部件名称，如 engine,hood,wheel（配合 --ref-face 使用，任意单词均可）")
     parser.add_argument("--views", type=str, default=None,
                         help="逗号分隔的视角列表，如: front,side,cut")
 
@@ -1096,9 +1048,25 @@ def main():
             args.count = len(views)
 
     out_dir = Path(args.output) if args.output else DEFAULT_OUTPUT_DIR
+    # --parts 模式：参考脸生成人脸部位特写
+    parts = None
+    if args.parts:
+        valid_parts = [p.strip().lower() for p in args.parts.split(",") if p.strip()]
+        if not valid_parts:
+            print("❌ 请指定至少一个部件，例如: engine,hood,wheel")
+            sys.exit(1)
+        if not args.ref_face:
+            print("❌ --parts 需要配合 --ref-face <图片路径>")
+            sys.exit(1)
+        print(f"📍 参考脸: {args.ref_face}")
+        print(f"👤 人脸部位: {valid_parts}")
+        words = valid_parts
+        args.style = args.style or "realistic-photo"
+
     batch_generate(words, args.count, args.style,
                    args.quality, args.force_cloud, args.dry_run,
-                   output_dir=out_dir, views=views)
+                   output_dir=out_dir, views=views,
+                   ref_face=args.ref_face, parts=parts)
 
 if __name__ == "__main__":
     main()
