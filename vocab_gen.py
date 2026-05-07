@@ -858,7 +858,9 @@ def generate(word, style_key, seed, quality, use_local,
     # 普通单词 → 正常流程
     style_key = style_key if style_key in STYLES else "flat-illustration"
     # 参考图模式：区分视角词 vs 真实部件，分别处理
-    effective_view = view  # 默认值
+    # 默认值（当 ref_image=None 时使用）
+    effective_view = view
+    view_word = word.strip().lower() if view else word.strip().lower()
     if ref_image:
         ref_desc = extract_ref_characteristics(ref_image)
         view_word = word.strip().lower()
@@ -902,12 +904,38 @@ def generate(word, style_key, seed, quality, use_local,
             else:
                 print("FAIL: " + reason[:60], flush=True)
                 Path(raw).unlink(missing_ok=True)
-                result["cloud_pending"] = True
+                # QA失败，重试一次本地生成
+                print("   🔄 QA失败，重试本地生成...", flush=True)
+                try:
+                    raw2 = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
+                    ok2, reason2 = qa_check_image(raw2, word, style_key, check_view)
+                    if ok2:
+                        result["file"] = raw2
+                        result["success"] = True
+                    else:
+                        print("   ❌ 重试也失败: " + reason2[:60], flush=True)
+                        Path(raw2).unlink(missing_ok=True)
+                        raise RuntimeError(f"QA failed twice: {reason2}")
+                except Exception as e2:
+                    raise RuntimeError(f"QA retry failed: {e2}") from e2
         else:
-            result["cloud_pending"] = True
+            # 本地ComfyUI未运行，确保启动后再重试
+            if comfy_ensure_running():
+                raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
+                ok, reason = qa_check_image(raw, word, style_key, check_view)
+                if ok:
+                    result["file"] = raw
+                    result["success"] = True
+                else:
+                    print("FAIL: " + reason[:60], flush=True)
+                    Path(raw).unlink(missing_ok=True)
+                    raise RuntimeError(f"QA failed: {reason}")
+            else:
+                raise RuntimeError("ComfyUI unavailable")
     except Exception as e:
+        result["success"] = False
         result["error"] = str(e)
-        result["cloud_pending"] = True
+        raise  # 让上层 batch_generate 捕获并重试
     return result
 
 # ═══════════════════════════════════════════════════════════════
@@ -996,7 +1024,17 @@ def batch_generate(words, count_per_word=1, style=None,
                              output_dir=out_dir, view=view,
                              ref_image=ref_face)
                 if res.get("cloud_pending"):
-                    print(f"☁️ [cloud-pending]")
+                    # 本地生成失败（ComfyUI离线/模型未加载），重试
+                    print(f"☁️ 本地失败，重试...")
+                    res2 = generate(w, st, seed, quality, use_local,
+                                  output_dir=out_dir, view=view,
+                                  ref_image=ref_face)
+                    if res2.get("success"):
+                        fname = Path(res2["file"]).name
+                        print(f"✅ {fname}", end="")
+                        res = res2
+                    else:
+                        print(f"❌ 重试也失败: {res2.get('error','?')}")
                 elif res["success"]:
                     fname = Path(res["file"]).name
                     print(f"✅ {fname}", end="")
@@ -1017,11 +1055,7 @@ def batch_generate(words, count_per_word=1, style=None,
     print(f"📊 统计: ✅ 成功 {success} | ☁️ 云端 {pending} | ⏭️ 预览 {dry}")
 
     if pending > 0 and not dry_run:
-        print("\n☁️ 云端待生成：")
-        for w, data in results.items():
-            for i, it in enumerate(data["items"]):
-                if it.get("cloud_pending"):
-                    print(f"  {w} #{i+1} [{VIEW_PROMPTS.get(it['view'],{}).get('desc','?')}]: {it['positive'][:80]}...")
+        print(f"\n⚠️  有 {pending} 张图片本地生成失败（ComfyUI离线或模型未加载）")
 
     return results
 
