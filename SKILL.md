@@ -3,7 +3,7 @@ name: vocab-picture
 description: >-
   英语单词学习图片生成器。批量生成、学习视角系统（多角度/切面/场景）、本地优先、8种风格。
   触发词：单词图片、学单词、英语图片、vocab
-version: 1.8.0
+version: 1.10.0
 ---
 
 # Vocab Picture Skill
@@ -121,7 +121,7 @@ results = batch_generate(
 
 ## 参考图模式
 
-基于同一张参考图片，生成该物体的不同部位或角度特写（SDXL img2img，denoise=0.65）。
+基于同一张参考图片，生成该物体的不同部位或角度特写。qwen2.5vl分析参考图提取视觉特征，拼接部件名后纯txt2img生成。
 
 ```bash
 # 任意物体：汽车的不同部件

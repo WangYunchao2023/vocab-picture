@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Vocab Picture Generator v1.8.0 - 英语单词学习图片批量生成器
-版本: 1.7.0
+Vocab Picture Generator v1.10.0 - 英语单词学习图片批量生成器
+版本: 1.10.0
 
-核心改进（v1.8）：
-- 参考图模式（--ref-face + --parts）：任意物体/实体不同部位特写，基于同一参考图保持一致性
-- SDXL img2img（denoise=0.65）：参考图作为 init latent，VAEEncode 编码后 KSampler 去噪
-- 支持所有视角词（front/side/top 等）作为虚拟部件
+核心改进（v1.10）：
+- 方案B（txt2img为主）：参考图提取视觉特征→拼入单词→纯txt2img生成
+- extract_ref_characteristics()：qwen2.5vl分析参考图，返回颜色/类型/风格描述
+- 生成质量稳定，不依赖img2img的denoise参数
 """
 
 import sys, os, argparse, time, json, random, shutil
@@ -78,6 +78,45 @@ VIEW_PROMPTS = {
 # ═══════════════════════════════════════════════════════════════
 # 人脸部位特写提示词（配合 --ref-face 参考图使用）
 # ═══════════════════════════════════════════════════════════════
+
+def extract_ref_characteristics(ref_image_path: str) -> str:
+    """
+    用 qwen2.5vl 分析参考图，返回主体视觉特征描述。
+    例如："white sedan car, modern design"
+    用于拼入后续提示词，保持生成一致性。
+    """
+    import base64, requests
+    with open(ref_image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    prompt_text = (
+        "Describe this image briefly for AI image generation purposes. "
+        "Focus ONLY on the main subject: what type of object is it? "
+        "What color? What is its overall style and key visual features? "
+        "Reply with a short 1-2 sentence visual description. "
+        "Example: 'white sedan car, modern design' or 'red sports car, sleek body'. "
+        "Do NOT describe background. Focus on the subject only."
+    )
+    payload = {
+        "model": "qwen2.5vl:latest",
+        "prompt": prompt_text,
+        "images": [img_b64],
+        "options": {"temperature": 0.2, "num_predict": 80},
+        "stream": False,
+    }
+    try:
+        r = requests.post("http://127.0.0.1:11434/api/generate",
+                         json=payload, timeout=60)
+        text = r.json().get("response", "").strip()
+    except Exception as e:
+        print("   WARNING: 参考图特征提取异常(" + str(e) + ")")
+        return "specific object"
+    text = text.strip()
+    if len(text) > 150:
+        text = text[:150]
+    print("   [Ref] " + text[:100], flush=True)
+    return text
+
+
 SPECIAL_PART_PROMPTS = {
     "eye": {"desc": "眼睛特写", "prompt": "extreme close-up of both eyes, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed eyes, watermark, text, extra fingers"},
     "nose": {"desc": "鼻子特写", "prompt": "extreme close-up of the nose, same person as reference photo, maintaining facial identity, realistic photograph, sharp focus, professional portrait lighting", "negative": "cartoon, illustration, anime, blurry, low quality, deformed nose, watermark, text, extra fingers"},
@@ -512,8 +551,7 @@ def comfy_warmup_model(model_key: str, timeout_sec: int = 120) -> bool:
 _WARMED_MODELS = set()
 
 def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
-                  model_override: str = None, model_name_override: str = None,
-                  ref_image: str = None, denoise: float = 0.6) -> str:
+                  model_override: str = None, model_name_override: str = None) -> str:
     """
     model_override: 直接指定 model_key（如 "realvisxl-v4"）
     model_name_override: 直接指定 model_name
@@ -553,14 +591,8 @@ def comfy_generate(prompt, negative, seed, steps, width, height, style_key,
         pass
     print("   📦 抢占 VRAM (evict LLM)...", end="", flush=True)
     try:
-        if ref_image:
-            wf = build_sdxl_ref_workflow(
-                ref_image, prompt, negative, seed, steps, width, height,
-                model_name=model_name_override or style['model_name'],
-                denoise=denoise)
-        else:
-            wf = build_workflow(prompt, negative, seed, steps, width, height, style_key,
-                               model_override=model_override, model_name_override=model_name_override)
+        wf = build_workflow(prompt, negative, seed, steps, width, height, style_key,
+                           model_override=model_override, model_name_override=model_name_override)
         print(f"   🎨 模型: {model_key}, 风格: {style_key}")
         print("   📤 提交任务...", end="", flush=True)
         pid = client.post_prompt(wf)
@@ -811,29 +843,17 @@ def composite_indicator(photo_path: str, target_pos: tuple,
 
 
 def generate(word, style_key, seed, quality, use_local,
-             output_dir=None, view=None, ref_image=None, denoise=0.6):
+             output_dir=None, view=None, ref_image=None):
     word = word.lower().strip()
     translation = get_translation(word)
 
     # 普通单词 → 正常流程
     style_key = style_key if style_key in STYLES else "flat-illustration"
-    # 参考图模式：任意物体/实体生成部位特写
+    # 参考图模式：提取特征 → 拼入部件名 → 纯txt2img生成
     if ref_image:
-        if word in SPECIAL_PART_PROMPTS:
-            part_info = SPECIAL_PART_PROMPTS[word]
-            positive = part_info["prompt"]
-            negative = part_info["negative"]
-        else:
-            # 通用模板：参考图为主体，生成指定部位/角度特写
-            positive = (
-                f"close-up detail of the {word} of the object in the reference photo, "
-                f"maintaining exact object identity, realistic photograph, "
-                f"sharp focus, professional studio lighting, high quality"
-            )
-            negative = (
-                "cartoon, illustration, anime, blurry, low quality, deformed, "
-                "watermark, text, extra limbs, bad anatomy, ugly"
-            )
+        ref_desc = extract_ref_characteristics(ref_image)
+        combined_word = (ref_desc + " " + word).strip()
+        positive, negative = build_prompt(combined_word, style_key, view=view)
     else:
         positive, negative = build_prompt(word, style_key, view=view)
     steps = STEPS_MAP.get(quality, 8)
@@ -849,10 +869,16 @@ def generate(word, style_key, seed, quality, use_local,
     }
     try:
         if use_local and comfy_ensure_running():
-            raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key,
-                               ref_image=ref_image, denoise=denoise)
-            result["file"] = raw
-            result["success"] = True
+            raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
+            # QA 审核
+            ok, reason = qa_check_image(raw, word, style_key, view)
+            if ok:
+                result["file"] = raw
+                result["success"] = True
+            else:
+                print("FAIL: " + reason[:60], flush=True)
+                Path(raw).unlink(missing_ok=True)
+                result["cloud_pending"] = True
         else:
             result["cloud_pending"] = True
     except Exception as e:
@@ -944,7 +970,7 @@ def batch_generate(words, count_per_word=1, style=None,
             try:
                 res = generate(w, st, seed, quality, use_local,
                              output_dir=out_dir, view=view,
-                             ref_image=ref_face, denoise=0.65)
+                             ref_image=ref_face)
                 if res.get("cloud_pending"):
                     print(f"☁️ [cloud-pending]")
                 elif res["success"]:
@@ -1059,7 +1085,7 @@ def main():
             print("❌ --parts 需要配合 --ref-face <图片路径>")
             sys.exit(1)
         print(f"📍 参考脸: {args.ref_face}")
-        print(f"👤 人脸部位: {valid_parts}")
+        print(f"📦 部件: {valid_parts}")
         words = valid_parts
         args.style = args.style or "realistic-photo"
 
