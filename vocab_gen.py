@@ -657,14 +657,17 @@ def build_prompt(word, style_key, view=None):
         if view:
             vp = VIEW_PROMPTS.get(view, VIEW_PROMPTS["front"])
             vp_template = vp["template"].format(word=word, bg=vp.get("bg",""))
+            # 如果模板本身不含人物词（hand/person/people），才加no-people约束
+            no_people = not any(k in vp_template.lower() for k in ["hand holding", "human ", "person ", "people"])
+            solo_clause = "solo object, no people, empty scene, object only, " if no_people else ""
             positive = (
-                f"DSLR photograph, solo object, no people, "
+                f"DSLR photograph, {solo_clause}"
                 f"{vp_template}, "
                 f"natural daylight, window light, slightly warm tone, "
                 f"shallow depth of field, slight bokeh, "
                 f"grain visible, slight noise, unpolished photo, "
                 f"off-center framing, not perfectly composed, "
-                f"no text, no watermark, empty scene, object only"
+                f"no text, no watermark"
             )
         else:
             positive = (
