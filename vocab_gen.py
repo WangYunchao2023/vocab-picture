@@ -49,6 +49,11 @@ VIEW_PROMPTS = {
         "template": "side view of {word}, profile visible, placed on {bg}",
         "bg": "wooden cutting board, soft natural light",
     },
+    "rear": {
+        "desc": "后方照",
+        "template": "rear view of {word}, back side visible, tail lights and license plate visible, placed on {bg}",
+        "bg": "parking lot, urban setting, overcast light",
+    },
     # 俯视图：从上往下拍
     "top": {
         "desc": "俯视图",
@@ -849,11 +854,25 @@ def generate(word, style_key, seed, quality, use_local,
 
     # 普通单词 → 正常流程
     style_key = style_key if style_key in STYLES else "flat-illustration"
-    # 参考图模式：提取特征 → 拼入部件名 → 纯txt2img生成
+    # 参考图模式：区分视角词 vs 真实部件，分别处理
+    effective_view = view  # 默认值
     if ref_image:
         ref_desc = extract_ref_characteristics(ref_image)
-        combined_word = (ref_desc + " " + word).strip()
-        positive, negative = build_prompt(combined_word, style_key, view=view)
+        view_word = word.strip().lower()
+        is_view_angle = view_word in VIEW_PROMPTS
+        if is_view_angle:
+            # 视角词：完整特征描述 + 对应视角
+            effective_word = ref_desc
+            effective_view = view_word
+        else:
+            # 真实部件名：完整特征 + 部件名，避免重复
+            ref_first = ref_desc.split(",")[0].strip()
+            if word.lower() in ref_first.lower():
+                effective_word = ref_desc
+            else:
+                effective_word = (ref_desc + " " + word).strip()
+            effective_view = "front"
+        positive, negative = build_prompt(effective_word, style_key, view=effective_view)
     else:
         positive, negative = build_prompt(word, style_key, view=view)
     steps = STEPS_MAP.get(quality, 8)
@@ -871,7 +890,9 @@ def generate(word, style_key, seed, quality, use_local,
         if use_local and comfy_ensure_running():
             raw = comfy_generate(positive, negative, seed, steps, 1024, 1024, style_key)
             # QA 审核
-            ok, reason = qa_check_image(raw, word, style_key, view)
+            check_view = effective_view if (view_word in VIEW_PROMPTS) else view
+            print(f"   🔍 QA 审核 (view={check_view})...", end=" ", flush=True)
+            ok, reason = qa_check_image(raw, word, style_key, check_view)
             if ok:
                 result["file"] = raw
                 result["success"] = True
