@@ -658,21 +658,21 @@ def build_prompt(word, style_key, view=None):
             vp = VIEW_PROMPTS.get(view, VIEW_PROMPTS["front"])
             vp_template = vp["template"].format(word=word, bg=vp.get("bg",""))
             positive = (
-                f"DSLR photograph, candid snapshot, natural imperfect, "
+                f"DSLR photograph, solo object, no people, "
                 f"{vp_template}, "
                 f"natural daylight, window light, slightly warm tone, "
                 f"shallow depth of field, slight bokeh, "
                 f"grain visible, slight noise, unpolished photo, "
                 f"off-center framing, not perfectly composed, "
-                f"no text, no watermark"
+                f"no text, no watermark, empty scene, object only"
             )
         else:
             positive = (
-                f"DSLR photograph, casual snapshot, natural imperfect, "
+                f"DSLR photograph, solo object, no people, empty scene, "
                 f"a {word}, placed casually in natural setting, "
                 f"window light, shallow depth of field, slight bokeh, "
                 f"grain visible, unpolished, off-center framing, "
-                f"no text, no watermark"
+                f"no text, no watermark, object only, no person"
             )
     else:
         # 插画风格：白背景、居中、干净
@@ -699,7 +699,7 @@ def build_prompt(word, style_key, view=None):
     neg_base = (
         "blurry, watermark, deformed, bad anatomy, ugly, distorted, "
         "low quality, jpeg artifacts, noisy, complex background, "
-        "multiple items, text, words, watermark logo, cropped"
+        "multiple items, text, words, watermark logo, cropped, people, person, human body, hand, finger, arm, leg, face, human silhouette"
     )
     negative = f"{neg_base}, {style.get('negative_extra','')}"
     return positive, negative
